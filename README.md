@@ -53,6 +53,10 @@ max-level character yet.
 the dashboard within seconds. It also refreshes from Blizzard on startup and
 hourly, and tells you when a new version of the app is out.
 
+**Several WoW accounts?** One Battle.net login can hold more than one WoW
+account (WoW1, WoW2...). Settings → *WoW accounts* lets you choose which ones
+the dashboard shows; gold and warband banks are read from every account.
+
 *Screenshots use example data with made-up character names.*
 
 ## Getting started
@@ -80,6 +84,7 @@ free — Blizzard's add-on policy requires that.
 - `/fl sync` or the on-screen **Sync** button — update the dashboard now
   (reloads your UI; WoW only saves addon data on reload, logout, or exit)
 - `/fl button` — show/hide the Sync button (shift-drag to move it)
+- `/fl cooldowns` — with a profession window open, list its cooldowns
 - Keybind: Options → Keybindings → AddOns → Forge's Ledger
 - `/forgesledger` works too, if another addon also uses `/fl`
 

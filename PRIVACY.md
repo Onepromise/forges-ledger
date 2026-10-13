@@ -42,8 +42,9 @@ replaced each time you sync, and **automatically deleted once it is more than
 ### 3. Your Settings
 - Roles you assign to characters (for example "Farmer" or "Main"), stored
   locally in `forge_dashboard_roles.json`.
-- Which characters you track (★), your gold goal, and your weekly checklist
-  checkmarks, stored locally in `forge_dashboard_settings.json`.
+- Which characters you track (★), your gold goal, your weekly checklist
+  checkmarks, and which of your WoW accounts the dashboard shows, stored
+  locally in `forge_dashboard_settings.json`.
 
 ### 4. Credentials
 - Your Blizzard API client ID and secret (which you create yourself on

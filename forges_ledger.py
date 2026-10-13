@@ -45,7 +45,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.3.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.3.1"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -134,6 +134,10 @@ STATE = {"syncing": False, "sync_error": None, "oauth_state": None,
 # the full sync and the addon-triggered single-character refresh run on
 # different threads; this stops them writing the cache file at the same time
 CACHE_LOCK = threading.Lock()
+# Requests run in parallel threads, and every POST is a read-modify-write of
+# a settings file (roles, tracked, goal, weekly) - one at a time, so two
+# quick clicks can't overwrite each other's change.
+WRITE_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------- secrets ---
@@ -424,7 +428,34 @@ def norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
+def wtf_account_dir():
+    """WoW's per-account folder root (..._retail_/WTF/Account), or None."""
+    cfg = load_config()
+    for base in [cfg.get("wow_path")] + WOW_PATH_GUESSES:
+        d = os.path.join(base, "_retail_", "WTF", "Account") if base else None
+        if d and os.path.isdir(d):
+            return d
+    return None
+
+
+def find_sv_files():
+    """[(account folder name, save file path)] for every WoW account on this
+    PC that has addon data. One Battle.net login can hold several WoW
+    accounts (WoW1, WoW2...), and each keeps its own save file."""
+    base = wtf_account_dir()
+    out = []
+    for account in sorted(os.listdir(base)) if base else []:
+        sv = os.path.join(base, account, "SavedVariables")
+        p = os.path.join(sv, ADDON_FOLDER + ".lua")
+        if not os.path.isfile(p):
+            p = os.path.join(sv, OLD_ADDON_FOLDER + ".lua")  # not migrated yet
+        if os.path.isfile(p):
+            out.append((account, p))
+    return out
+
+
 def find_sv_file():
+    """The most recently saved addon file - the one the game just wrote."""
     cfg = load_config()
     guesses = []
     if cfg.get("wow_path"):
@@ -472,17 +503,23 @@ def _cooldowns(raw):
 def load_gold():
     """Read the addon's save file.
 
-    Returns (chars, path, warband):
-      chars   = {normkey: {name, realm, money, level, class, faction, history}}
-      warband = {money, updated, history} for the account's warband bank, or
-                None if the addon hasn't recorded it yet (v1.4+, after a bank
-                has been opened or its balance has changed)."""
-    path = find_sv_file()
-    if not path:
-        return {}, None, None
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        db = parse_savedvariables(f.read())
-    out = {}
+    Returns (chars, newest_path, warbands):
+      chars    = {normkey: {name, realm, money, level, class, ..., folder}}
+      warbands = {account folder: {money, updated, history}} - each WoW
+                 account's warband bank, once the addon has recorded it
+                 (v1.4+, after a bank was opened or its balance changed)."""
+    files = find_sv_files()
+    out, warbands = {}, {}
+    for folder, path in files:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            db = parse_savedvariables(f.read())
+        _read_addon_db(db, folder, out, warbands)
+    newest = max((p for _f, p in files), key=os.path.getmtime, default=None)
+    return out, newest, warbands
+
+
+def _read_addon_db(db, folder, out, warbands):
+    """Add one account folder's addon data into out / warbands."""
     for key, c in (db.get("chars") or {}).items():
         if not isinstance(c, dict):
             continue
@@ -503,13 +540,70 @@ def load_gold():
             "xp_max": c.get("xpMax"),
             "last_seen": c.get("lastSeen", 0) or 0,
             "cooldowns": _cooldowns(c.get("cooldowns")),
+            "folder": folder,
         }
+    # each WoW account has its own warband bank
     w = db.get("warband")
-    warband = None
     if isinstance(w, dict) and isinstance(w.get("money"), (int, float)):
-        warband = {"money": w["money"], "updated": w.get("updated", 0),
-                   "history": _history(w.get("history"))}
-    return out, path, warband
+        warbands[folder] = {"money": w["money"], "updated": w.get("updated", 0),
+                            "history": _history(w.get("history"))}
+
+
+def account_labels(characters):
+    """Name Blizzard's numbered WoW accounts after their folders on this PC.
+
+    The API only gives an account number. WoW keeps a folder per account
+    (WTF/Account/MYACCOUNT, 12345678#1...) with a subfolder for every
+    character played on it, so the folder whose characters best match an
+    account's characters is that account. Returns ({id: label},
+    {folder: id})."""
+    base = wtf_account_dir()
+    folders = {}
+    for folder in os.listdir(base) if base else []:
+        fdir = os.path.join(base, folder)
+        if folder == "SavedVariables" or not os.path.isdir(fdir):
+            continue
+        keys = set()
+        for realm in os.listdir(fdir):
+            rdir = os.path.join(fdir, realm)
+            if realm != "SavedVariables" and os.path.isdir(rdir):
+                keys.update(norm(ch) + "@" + norm(realm) for ch in os.listdir(rdir)
+                            if os.path.isdir(os.path.join(rdir, ch)))
+        folders[folder] = keys
+    by_id = {}
+    for c in characters:
+        if c.get("account_id") is not None:
+            by_id.setdefault(c["account_id"], set()).add(
+                norm(c["name"]) + "@" + norm(c.get("realm_slug", "")))
+    labels, folder_ids = {}, {}
+    for aid, keys in by_id.items():
+        best = max(folders, key=lambda f: len(folders[f] & keys), default=None)
+        if best and folders[best] & keys:
+            # the launcher shows "12345678#2" as "WoW2"
+            m = re.match(r"^\d+#(\d+)$", best)
+            labels[aid] = "WoW" + m.group(1) if m else best
+            folder_ids[best] = aid
+    return labels, folder_ids
+
+
+def accounts_info(cache, settings=None):
+    """Per WoW account: label, character count, best characters, included?"""
+    chars = cache.get("characters", [])
+    labels, _ = account_labels(chars)
+    picked = set((settings or {}).get("accounts") or [])
+    out = {}
+    for c in chars:
+        aid = c.get("account_id")
+        if aid is None:
+            continue
+        a = out.setdefault(aid, {"id": aid, "label": labels.get(aid) or "Account %s" % aid,
+                                 "count": 0, "top": []})
+        a["count"] += 1
+        a["top"].append((c.get("level") or 0, c["name"]))
+    for a in out.values():
+        a["top"] = ["%s %d" % (n, lv) for lv, n in sorted(a["top"], reverse=True)[:3]]
+        a["included"] = not picked or a["id"] in picked
+    return sorted(out.values(), key=lambda a: -a["count"])
 
 
 def gold_7d_change(hist):
@@ -743,6 +837,7 @@ def sync_all():
         for acct in account.get("wow_accounts", []):
             for ch in acct.get("characters", []):
                 bases.append({
+                    "account_id": acct.get("id"),
                     "name": ch.get("name", ""),
                     "realm_slug": (ch.get("realm") or {}).get("slug", ""),
                     "realm": (ch.get("realm") or {}).get("name", ""),
@@ -753,8 +848,8 @@ def sync_all():
                 })
     else:
         # keep last known professions in case this character's refresh fails
-        keep = ("name", "realm_slug", "realm", "level", "class", "faction",
-                "professions")
+        keep = ("account_id", "name", "realm_slug", "realm", "level", "class",
+                "faction", "professions")
         bases = [{k: c.get(k) for k in keep} for c in old["characters"]]
     dataset = []
     for i, entry in enumerate(bases):
@@ -1483,7 +1578,9 @@ function fillStaticOptions(){
 function header(){
   const si=$("syncinfo");
   if(D.synced_at){const m=Math.round((Date.now()/1000-D.synced_at)/60);
-    si.textContent="Synced with Blizzard "+(m<1?"just now":m<120?m+" min ago":Math.round(m/60)+" h ago")+" · "+D.characters.length+" characters"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):"");}
+    const shown=(D.accounts||[]).filter(a=>a.included),acctNote=shown.length&&shown.length<D.accounts.length
+      ?' · showing '+shown.map(a=>esc(a.label)).join(", ")+' (<a href="/setup" style="color:inherit">change</a>)':"";
+    si.innerHTML=esc("Synced with Blizzard "+(m<1?"just now":m<120?m+" min ago":Math.round(m/60)+" h ago")+" · "+D.characters.length+" characters"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):""))+acctNote;}
   else si.textContent="Never synced — Connect Battle.net, then Sync now.";
   let a="";
   if(new URLSearchParams(location.search).get("ok")){history.replaceState(null,"",location.pathname);if(D.connected)a+='<div class="alert ok">Battle.net connected.</div>';}
@@ -1900,12 +1997,31 @@ function resetText(ts){
   const s=ts-Date.now()/1000,d=Math.floor(s/86400),h=Math.floor(s%86400/3600);
   return (d?d+"d ":"")+h+"h · "+new Date(ts*1000).toLocaleString(undefined,{weekday:"short",hour:"numeric",minute:"2-digit"});
 }
+// Recipes that share one cooldown (e.g. all Mote transmutes) are used and
+// ready together, so they're shown as one chip: same profession and ready
+// within a minute of each other = same cooldown.
+function cooldownGroups(list){
+  const groups=[];
+  [...list].sort((a,b)=>a.ready_at-b.ready_at).forEach(cd=>{
+    const g=groups.find(g=>g.profession===cd.profession&&Math.abs(g.ready_at-cd.ready_at)<=60);
+    g?g.names.push(cd.name):groups.push({profession:cd.profession,ready_at:cd.ready_at,names:[cd.name]});
+  });
+  return groups;
+}
+// "Transmute: Mote of Light" + "Transmute: Mote of Wild Magic" -> "Transmute: Mote of …"
+function sharedLabel(names){
+  if(names.length===1)return names[0];
+  let pre=names.reduce((p,n)=>{let i=0;while(i<p.length&&p[i]===n[i])i++;return p.slice(0,i)});
+  pre=pre.slice(0,pre.lastIndexOf(" ")+1).replace(/[\s:,-]+$/,"");
+  return pre.length>=6?pre+" … ("+names.length+")":names[0]+" +"+(names.length-1)+" more";
+}
 function cooldownCell(c){
-  if(!c.cooldowns||!c.cooldowns.length)return '<span class="faint" title="Update the addon to v2.1, then open your profession window in game after using a cooldown">—</span>';
+  if(!c.cooldowns||!c.cooldowns.length)return '<span class="faint" title="Update the addon to v2.2, then open your profession window in game after using a cooldown">—</span>';
   const now=Date.now()/1000;
-  return c.cooldowns.map(cd=>{const used=cd.ready_at>now;
-    return '<span class="pill'+(used?" maxed":"")+'" title="'+esc(cd.profession)+'">'+(used?"✓ ":"")+esc(cd.name)+
-      ' <span class="exp">'+(used?"ready in "+resetText(cd.ready_at).split(" · ")[0]:"ready")+"</span></span>"}).join("");
+  return cooldownGroups(c.cooldowns).map(g=>{const used=g.ready_at>now;
+    const tip=g.profession+(g.names.length>1?" — these share one cooldown:&#10;"+g.names.map(esc).join("&#10;"):"");
+    return '<span class="pill'+(used?" maxed":"")+'" title="'+tip+'">'+(used?"✓ ":"")+esc(sharedLabel(g.names))+
+      ' <span class="exp">'+(used?"ready in "+resetText(g.ready_at).split(" · ")[0]:"ready")+"</span></span>"}).join("");
 }
 function renderWeekly(){
   document.querySelectorAll("#wscope button").forEach(b=>b.classList.toggle("on",b.dataset.wscope===ui.wscope));
@@ -2014,6 +2130,8 @@ a{color:var(--accent)}
 .hint{color:var(--faint);font-size:12px;margin-top:6px}
 details summary{cursor:pointer;color:var(--accent);font-size:13px;margin-top:4px}
 .note{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.6}
+label.acct{display:flex;align-items:baseline;gap:8px;margin:8px 0;color:var(--txt);font-size:14px;cursor:pointer}
+label.acct input{width:auto;accent-color:var(--accent)}
 </style></head><body><div class="wrap">
 <h1>%%TITLE%%</h1>
 <div class="sub">%%SUBTITLE%%</div>
@@ -2067,6 +2185,8 @@ details summary{cursor:pointer;color:var(--accent);font-size:13px;margin-top:4px
 <div class="row"><button class="btn primary" type="submit">%%SUBMIT_LABEL%%</button>%%BACK_LINK%%</div>
 </form>
 
+%%ACCOUNTS%%
+
 <div class="note">Everything stays on this computer: there are no servers, no analytics and no tracking. Read the <a href="/privacy" target="_blank">privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
 World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.</div>
@@ -2076,6 +2196,17 @@ document.addEventListener("click",async e=>{
   if(e.target.id==="install-addon")return installAddon(e.target);
   const b=e.target.closest(".copy");if(!b)return;
   try{await navigator.clipboard.writeText(b.dataset.copy);b.textContent="Copied";setTimeout(()=>b.textContent="Copy",1500)}catch(err){}
+});
+document.addEventListener("change",async e=>{
+  if(!e.target.classList.contains("acct-cb"))return;
+  const boxes=[...document.querySelectorAll(".acct-cb")],ids=boxes.filter(b=>b.checked).map(b=>+b.value);
+  const st=document.getElementById("acct-status");
+  if(!ids.length){e.target.checked=true;st.textContent="Keep at least one account selected.";return}
+  try{
+    const r=await fetch("/api/accounts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({include:ids})});
+    if(!r.ok)throw new Error("save failed");
+    st.textContent="Saved - showing "+ids.length+" of "+boxes.length+" accounts.";
+  }catch(err){e.target.checked=!e.target.checked;st.textContent="Couldn't save - try again."}
 });
 async function installAddon(btn){
   btn.disabled=true;btn.textContent="Installing…";
@@ -2174,9 +2305,30 @@ def render_setup(error=None, notice=None, form=None):
         "%%SUBMIT_LABEL%%": ("Save" if configured and is_connected()
                              else "Save and connect to Battle.net"),
         "%%BACK_LINK%%": ('<a href="/">Back to dashboard</a>' if configured else ""),
+        "%%ACCOUNTS%%": accounts_card() if configured else "",
     }.items():
         page = page.replace(k, v)
     return page
+
+
+def accounts_card():
+    """Settings card: pick which WoW accounts the dashboard shows."""
+    esc = html.escape
+    accts = accounts_info(load_cache(), load_settings())
+    head = ('<div class="card"><h2><span class="n">6</span>WoW accounts</h2>'
+            '<p class="why">One Battle.net login can hold several WoW accounts (the '
+            'launcher\'s account picker). Choose which ones the dashboard shows - '
+            'every tab, the totals and your gold goal follow this.</p>')
+    if not accts:
+        return head + ('<div class="status warn">Sync once from the dashboard to list '
+                       'your WoW accounts here.</div></div>')
+    rows = "".join(
+        '<label class="acct"><input type="checkbox" class="acct-cb" value="%s"%s> '
+        '<b>%s</b> <span class="faint">- %d character%s · %s</span></label>'
+        % (a["id"], " checked" if a["included"] else "", esc(a["label"]), a["count"],
+           "" if a["count"] == 1 else "s", esc(", ".join(a["top"])))
+        for a in accts)
+    return head + rows + '<div class="hint" id="acct-status">Changes save as you click.</div></div>'
 
 
 def detect_wow_path():
@@ -2290,11 +2442,11 @@ def build_api_data():
     cache = load_cache()
     addon_error = None
     try:
-        gold, sv_path, warband = load_gold()
+        gold, sv_path, warbands = load_gold()
     except Exception as e:
         # a save file we can't read shouldn't take the whole dashboard down -
         # show the Blizzard data and say what went wrong instead
-        gold, sv_path, warband = {}, find_sv_file(), None
+        gold, sv_path, warbands = {}, find_sv_file(), {}
         addon_error = "Couldn't read the addon save file (%s)." % e
     roles = load_roles()
     settings = load_settings()
@@ -2330,6 +2482,20 @@ def build_api_data():
                 "professions": [], "gold": g["money"],
                 "gold_7d": gold_7d_change(g.get("history", [])),
             })
+    # Only the WoW accounts picked in Settings (none picked = all). A
+    # character whose account isn't known yet (not synced since this
+    # feature) stays visible rather than silently disappearing.
+    picked = set(settings.get("accounts") or [])
+    _labels, folder_ids = account_labels(cache.get("characters", []))
+    if picked:
+        def included(c):
+            aid = c.get("account_id")
+            if aid is None:
+                aid = folder_ids.get(gold.get(c["key"], {}).get("folder"))
+            return aid is None or aid in picked
+        chars = [c for c in chars if included(c)]
+        warbands = {f: w for f, w in warbands.items()
+                    if folder_ids.get(f) in picked}
     for c in chars:
         g = gold.get(c["key"], {})
         c["cooldowns"] = g.get("cooldowns", [])
@@ -2348,15 +2514,17 @@ def build_api_data():
     at_cap = sum(1 for c in tracked if (c.get("level") or 0) >= CAP)
     levels_remaining = sum(max(0, CAP - (c.get("level") or 0)) for c in tracked)
     chars_total = sum(c.get("gold", 0) for c in chars)
-    bank = warband["money"] if warband else 0
-    bank_7d = gold_7d_change(warband["history"]) if warband else 0
+    bank = sum(w["money"] for w in warbands.values())
+    bank_7d = sum(gold_7d_change(w["history"]) for w in warbands.values())
     gold_total = chars_total + bank
     gold_7d = sum(c.get("gold_7d", 0) for c in chars) + bank_7d
-    # the goal's pace counts the bank like one more "character", so moving
-    # gold between characters and the bank isn't mistaken for earning it
-    goal_series = dict(gold)
-    if warband:
-        goal_series["__warband_bank__"] = warband
+    # The goal's pace counts each warband bank like one more "character", so
+    # moving gold between characters and a bank isn't mistaken for earning
+    # it. Only the characters still shown count toward the goal.
+    shown = {c["key"] for c in chars}
+    goal_series = {k: g for k, g in gold.items() if k in shown}
+    for folder, w in warbands.items():
+        goal_series["__warband_bank__" + folder] = w
 
     # only send recipe COUNTS per tier; full names come from /api/catalog/<id>
     # on demand, which keeps this payload small
@@ -2389,8 +2557,10 @@ def build_api_data():
         },
         "gold_goal": gold_goal_status(settings["gold_goal"], goal_series, gold_total),
         "warband_bank": ({"money": bank, "fmt": fmt_gold(bank),
-                          "updated": warband["updated"], "gold_7d": bank_7d}
-                         if warband else None),
+                          "updated": max(w["updated"] for w in warbands.values()),
+                          "gold_7d": bank_7d}
+                         if warbands else None),
+        "accounts": accounts_info(cache, settings),
     }
 
 
@@ -2460,6 +2630,9 @@ def read_json_body(handler, body):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "ForgesLedger/" + APP_VERSION
+    # drop a connection that sends nothing for a minute, so idle browser
+    # connections don't hold a thread forever
+    timeout = 60
 
     def log_message(self, *a):
         pass
@@ -2623,6 +2796,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        with WRITE_LOCK:
+            self._do_post()
+
+    def _do_post(self):
         parsed = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8", "replace")
@@ -2734,6 +2911,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if parsed.path == "/api/accounts":
+            req = read_json_body(self, body)
+            known = {a["id"] for a in accounts_info(load_cache())}
+            try:
+                ids = [int(i) for i in (req or {}).get("include", [])]
+            except (TypeError, ValueError):
+                ids = None
+            if req is None or ids is None or not set(ids) <= known:
+                self.send_json({"error": "bad request"}, 400)
+                return
+            s = load_settings()
+            # all of them picked = no filter (new accounts then show up too)
+            s["accounts"] = [] if set(ids) == known else sorted(ids)
+            save_settings(s)
+            self.send_json({"ok": True})
+            return
+
         if parsed.path == "/api/weekly":
             req = read_json_body(self, body)
             item = (req or {}).get("item")
@@ -2786,7 +2980,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
-class LocalServer(http.server.HTTPServer):
+class LocalServer(http.server.ThreadingHTTPServer):
+    # One thread per connection. The plain HTTPServer handles a single
+    # connection at a time, and browsers open "speculative" connections they
+    # may never send anything on - the server would wait on one forever and
+    # every other request would queue behind it (the dashboard froze).
+    daemon_threads = True  # don't keep the app alive for open connections
     # Python turns on SO_REUSEADDR by default. On Windows that option lets a
     # SECOND process bind a port that's already in use, so two copies of the
     # app would silently share port 8765. Off = the second copy gets an

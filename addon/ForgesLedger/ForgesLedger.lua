@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.1 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.2 (formerly Forge Gold Tracker)
 -- Records each character's gold (plus class/level/faction and a daily
 -- history), and the account's warband bank gold, into SavedVariables for Forge's Ledger running on this PC.
 --
@@ -15,7 +15,7 @@
 -- Nothing is sent anywhere. All data stays on your PC.
 
 local ADDON_NAME = "ForgesLedger"
-local VERSION = "2.1"
+local VERSION = "2.2"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -131,35 +131,64 @@ end
 -- break the rest of the addon.
 local cooldownScanQueued = false
 
-local function ScanCooldowns()
+-- Is a profession window showing right now? The cooldown API answers for
+-- whichever profession was opened last, so only trust it while one is open.
+local function ProfessionWindowOpen()
+    return ProfessionsFrame and ProfessionsFrame.IsShown and ProfessionsFrame:IsShown()
+end
+
+-- verbose = print what was found (the /fl cooldowns command), so problems
+-- can be diagnosed from chat instead of guessed at.
+local function ScanCooldowns(verbose)
     cooldownScanQueued = false
+    local say = verbose and function(msg) print(PREFIX .. msg) end or function() end
     local T = C_TradeSkillUI
     if not (T and T.GetAllRecipeIDs and T.GetRecipeCooldown and T.GetRecipeInfo
             and T.GetBaseProfessionInfo) then
+        say("This game version doesn't offer the profession cooldown functions.")
         return
     end
     local okP, prof = pcall(T.GetBaseProfessionInfo)
     local profName = okP and type(prof) == "table" and prof.professionName
-    if not profName or profName == "" then return end
+    if not profName or profName == "" then
+        say("Open a profession window first.")
+        return
+    end
     local ok, ids = pcall(T.GetAllRecipeIDs)
-    if not ok or type(ids) ~= "table" then return end
+    if not ok or type(ids) ~= "table" then
+        say("Couldn't read the " .. profName .. " recipe list.")
+        return
+    end
     local c = ForgeGoldDB.chars and ForgeGoldDB.chars[CharKey()]
     if not c then return end
     c.cooldowns = c.cooldowns or {}
-    local now = time()
+    local now, learned, found = time(), 0, 0
     for _, id in ipairs(ids) do
         local okI, info = pcall(T.GetRecipeInfo, id)
         if okI and type(info) == "table" and info.learned then
-            local okC, cd = pcall(T.GetRecipeCooldown, id)
+            learned = learned + 1
+            local okC, cd, isDay, charges, maxCharges = pcall(T.GetRecipeCooldown, id)
+            -- a running cooldown, or a charge-based recipe with a charge spent
+            local spent = type(maxCharges) == "number" and maxCharges > 0
+                          and type(charges) == "number" and charges < maxCharges
             if okC and type(cd) == "number" and cd > 0 then
                 c.cooldowns[tostring(id)] = {
                     name = info.name, profession = profName,
                     readyAt = now + math.floor(cd),
                 }
                 dirty = true
+                found = found + 1
+                say(string.format("  %s: on cooldown, ready in %s%s", info.name or id,
+                    SecondsToTime and SecondsToTime(cd) or (math.floor(cd / 60) .. " min"),
+                    spent and string.format(" (%d/%d charges)", charges, maxCharges) or ""))
+            elseif verbose and spent then
+                say(string.format("  %s: %d/%d charges, no timer reported", info.name or id,
+                    charges, maxCharges))
             end
         end
     end
+    say(string.format("%s: %d recipes known, %d on cooldown%s.", profName, learned, found,
+        found > 0 and " - saved; /fl sync to update the app" or ""))
 end
 
 -- the list-update event fires in bursts; scan once, a moment after it settles
@@ -177,6 +206,7 @@ function ForgesLedger_Sync()
     end
     Snapshot()
     SnapshotWarband()
+    if ProfessionWindowOpen() then ScanCooldowns() end
     -- the reload wipes chat, so leave a note and confirm after it
     ForgeGoldDB.syncPending = true
     ReloadUI()
@@ -256,6 +286,8 @@ pcall(frame.RegisterEvent, frame, "ACCOUNT_MONEY")          -- warband bank chan
 pcall(frame.RegisterEvent, frame, "UPDATE_EXHAUSTION")      -- rested XP changed
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")       -- profession opened
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
+pcall(frame.RegisterEvent, frame, "TRADE_SKILL_ITEM_CRAFTED_RESULT") -- a craft finished
+pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED")        -- includes crafting
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
@@ -279,8 +311,12 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         UpdateButton()
     elseif event == "UPDATE_EXHAUSTION" then
         Snapshot()
-    elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_LIST_UPDATE" then
+    elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_LIST_UPDATE"
+            or event == "TRADE_SKILL_ITEM_CRAFTED_RESULT" then
         QueueCooldownScan()
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        -- a crafted recipe's cooldown starts when its cast finishes
+        if arg1 == "player" and ProfessionWindowOpen() then QueueCooldownScan() end
     elseif event == "ACCOUNT_MONEY" then
         SnapshotWarband()
         UpdateButton()
@@ -309,6 +345,7 @@ end
 -- /fl        : gold total across recorded characters + warband bank
 -- /fl sync   : save now and reload so the app updates immediately
 -- /fl button : show/hide the on-screen Sync button
+-- /fl cooldowns : list the open profession's cooldowns (diagnostics)
 -- /fl help   : list commands
 -- /forgesledger works too, in case another addon also claims /fl
 SLASH_FORGESLEDGER1 = "/fl"
@@ -317,6 +354,8 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
     local cmd = strtrim((msg or ""):lower())
     if cmd == "sync" then
         ForgesLedger_Sync()
+    elseif cmd == "cooldowns" or cmd == "cd" then
+        ScanCooldowns(true)
     elseif cmd == "button" then
         ForgeGoldDB.hideButton = not ForgeGoldDB.hideButton
         if syncButton then syncButton:SetShown(not ForgeGoldDB.hideButton) end
@@ -326,6 +365,7 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print("  /fl - gold total (characters + warband bank)")
         print("  /fl sync - update the app now (reloads UI)")
         print("  /fl button - show/hide the Sync button (shift-drag to move it)")
+        print("  /fl cooldowns - with a profession window open, list its cooldowns")
         print("  " .. SavedText())
     else
         local total, n = CharactersTotal()
