@@ -53,6 +53,11 @@ max-level character yet.
 the dashboard within seconds. It also refreshes from Blizzard on startup and
 hourly, and tells you when a new version of the app is out.
 
+**WoW Forever** — if WoW Forever is installed, a **Retail / Forever** switch
+appears at the top. Forever has its own characters, level cap (60), tracked
+roster, and gold goal. Blizzard doesn't offer Forever character data yet, so
+Forever shows what the addon records: gold, level, class, and rested XP.
+
 **Several WoW accounts?** One Battle.net login can hold more than one WoW
 account (WoW1, WoW2...). Settings → *WoW accounts* lets you choose which ones
 the dashboard shows; gold and warband banks are read from every account.

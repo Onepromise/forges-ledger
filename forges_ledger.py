@@ -45,7 +45,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.3.1"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.3.2"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -115,6 +115,15 @@ CATALOG_MAX_AGE = 7 * 86400
 
 # Blizzard Developer API Terms of Use 2(s): API Data may be kept 30 days max.
 API_DATA_TTL = 30 * 86400
+
+# WoW Forever: the original world with a level 60 cap and (at launch) the
+# original nine classes. Blizzard offers no Forever API yet, so Forever data
+# comes from the addon only.
+FOREVER_CAP = 60
+FOREVER_CLASSES = ["Warrior", "Paladin", "Hunter", "Rogue", "Priest", "Shaman",
+                   "Mage", "Warlock", "Druid"]
+ALL_CLASSES = ["Death Knight", "Demon Hunter", "Druid", "Evoker", "Hunter", "Mage",
+               "Monk", "Paladin", "Priest", "Rogue", "Shaman", "Warlock", "Warrior"]
 
 # How stale the Blizzard data may get before the dashboard re-syncs by itself.
 AUTO_SYNC_EVERY = 3600
@@ -428,21 +437,64 @@ def norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def wtf_account_dir():
-    """WoW's per-account folder root (..._retail_/WTF/Account), or None."""
+def wow_root():
+    """The World of Warcraft install folder (holds _retail_ and the others)."""
     cfg = load_config()
     for base in [cfg.get("wow_path")] + WOW_PATH_GUESSES:
-        d = os.path.join(base, "_retail_", "WTF", "Account") if base else None
-        if d and os.path.isdir(d):
-            return d
+        if base and os.path.isdir(os.path.join(base, "_retail_")):
+            return base
     return None
 
 
-def find_sv_files():
+def forever_clients(root=None):
+    """Folders of installed WoW Forever clients (e.g. ..._classic_beta_).
+
+    The launcher keeps every installed game version in .build.info, with a
+    product name and version per line. Forever is the 1.60+ branch (its
+    beta is 1.60.1); Classic Era stays on 1.15, so the version tells them
+    apart without depending on folder names that may change at launch.
+    Product "wow_classic_beta" lives in folder "_classic_beta_"."""
+    root = root or wow_root()
+    if not root:
+        return []
+    found = []
+    try:
+        with open(os.path.join(root, ".build.info"), encoding="utf-8", errors="replace") as f:
+            lines = [l.rstrip("\r\n") for l in f if l.strip()]
+        head = [h.split("!")[0] for h in lines[0].split("|")]
+        col_p, col_v = head.index("Product"), head.index("Version")
+        for line in lines[1:]:
+            cells = line.split("|")
+            product, version = cells[col_p], cells[col_v]
+            m = re.match(r"(\d+)\.(\d+)", version)
+            if not m or not product.startswith("wow_") or not (
+                    int(m.group(1)) == 1 and int(m.group(2)) >= 60):
+                continue
+            folder = os.path.join(root, "_" + product[len("wow_"):] + "_")
+            if os.path.isdir(folder) and folder not in found:
+                found.append(folder)
+    except (OSError, ValueError, IndexError):
+        pass
+    if os.path.isdir(os.path.join(root, "_forever_")):  # in case it ships under that name
+        found.append(os.path.join(root, "_forever_"))
+    return found
+
+
+def wtf_account_dir(client=None):
+    """A game client's per-account folder root (<client>/WTF/Account), or
+    None. client = full path of a client folder; default retail."""
+    if client is None:
+        root = wow_root()
+        client = os.path.join(root, "_retail_") if root else None
+    d = os.path.join(client, "WTF", "Account") if client else None
+    return d if d and os.path.isdir(d) else None
+
+
+def find_sv_files(client=None):
     """[(account folder name, save file path)] for every WoW account on this
     PC that has addon data. One Battle.net login can hold several WoW
     accounts (WoW1, WoW2...), and each keeps its own save file."""
-    base = wtf_account_dir()
+    base = wtf_account_dir(client)
     out = []
     for account in sorted(os.listdir(base)) if base else []:
         sv = os.path.join(base, account, "SavedVariables")
@@ -455,7 +507,16 @@ def find_sv_files():
 
 
 def find_sv_file():
-    """The most recently saved addon file - the one the game just wrote."""
+    """The most recently saved addon file - the one the game just wrote -
+    in retail or Forever, so /fl sync in either game updates the page."""
+    paths = [p for _f, p in find_sv_files()]
+    for c in forever_clients():
+        paths += [p for _f, p in find_sv_files(c)]
+    return max(paths, key=os.path.getmtime, default=None)
+
+
+def _find_retail_sv_file():
+    """(Kept for reference: the original retail-only lookup.)"""
     cfg = load_config()
     guesses = []
     if cfg.get("wow_path"):
@@ -500,7 +561,7 @@ def _cooldowns(raw):
     return sorted(out, key=lambda c: (c["profession"], c["name"]))
 
 
-def load_gold():
+def load_gold(client=None):
     """Read the addon's save file.
 
     Returns (chars, newest_path, warbands):
@@ -508,7 +569,7 @@ def load_gold():
       warbands = {account folder: {money, updated, history}} - each WoW
                  account's warband bank, once the addon has recorded it
                  (v1.4+, after a bank was opened or its balance changed)."""
-    files = find_sv_files()
+    files = find_sv_files(client)
     out, warbands = {}, {}
     for folder, path in files:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1402,6 +1463,9 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 .goal form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:12px}
 .goal label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim)}
 .good{color:var(--green) !important}.warn{color:var(--amber) !important}
+.mg{color:var(--gold)}.ms{color:#c9ccd6}.mc{color:#d4894b}
+#gamesw{vertical-align:middle;margin-right:6px}
+#gamesw button{padding:8px 14px}
 .picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px}
 .pick{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .pick:first-child{border-color:#3b4a8a;background:#171c2b}
@@ -1428,7 +1492,8 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
 
 <header>
   <div><h1>Forge&#39;s Ledger</h1><div class="sub" id="syncinfo">Loading…</div></div>
-  <div><a class="btn" href="/setup">Settings</a> <a class="btn" href="/connect">Connect Battle.net</a> <button class="btn primary" id="syncbtn">Sync now</button></div>
+  <div><div class="seg" id="gamesw" hidden><button data-game="retail">Retail</button><button data-game="forever">Forever</button></div>
+  <a class="btn" href="/setup">Settings</a> <a class="btn" href="/connect">Connect Battle.net</a> <button class="btn primary" id="syncbtn">Sync now</button></div>
 </header>
 <div id="alert"></div>
 <div class="stats" id="stats"></div>
@@ -1523,12 +1588,12 @@ World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertai
 const CLASS_COLORS={"Death Knight":"#C41E3A","Demon Hunter":"#A330C9","Druid":"#FF7C0A","Evoker":"#33937F","Hunter":"#AAD372","Mage":"#3FC7EB","Monk":"#00FF98","Paladin":"#F48CBA","Priest":"#FFFFFF","Rogue":"#FFF468","Shaman":"#0070DD","Warlock":"#8788EE","Warrior":"#C69B6D"};
 const CLASSES=Object.keys(CLASS_COLORS);
 const GATHER=new Set(["Herbalism","Mining","Skinning"]);
-const CAP=90;
+let CAP=90;  // max level of the game being shown (Forever: 60) - set from the data
 let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap"},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",game:"retail"},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
@@ -1546,6 +1611,19 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;",
 function $(id){return document.getElementById(id)}
 // exact whole gold, dropping silver/copper - matches the server's fmt_gold
 function fmtG(c){return Math.trunc((c||0)/10000).toLocaleString()+"g"}
+// Money as HTML (safe: built from numbers only). Retail shows whole gold;
+// WoW Forever - where amounts are far smaller - shows gold, silver and
+// copper, colored like the game's money display: 1,234g 56s 78c.
+function money(copper){
+  const c=Math.trunc(Math.abs(copper||0));
+  if(!D||D.game!=="forever")return Math.trunc(c/10000).toLocaleString()+"g";
+  const g=Math.floor(c/10000),s=Math.floor(c%10000/100),cp=c%100,parts=[];
+  if(g)parts.push('<span class="mg">'+g.toLocaleString()+"g</span>");
+  if(s)parts.push('<span class="ms">'+s+"s</span>");
+  if(cp||!parts.length)parts.push('<span class="mc">'+cp+"c</span>");
+  return parts.join(" ");
+}
+function signedMoney(copper){return copper>0?"+"+money(copper):copper<0?"−"+money(-copper):"—"}
 function cc(cls){return CLASS_COLORS[cls]||"var(--txt)"}
 function roleChip(r){return r?'<span class="role r-'+esc(r)+'">'+esc(r)+"</span>":""}
 function nameHtml(c){return '<span class="cn" style="color:'+cc(c.class)+'">'+esc(c.name)+'</span> <button class="trk'+(c.tracked?" on":"")+'" data-track="'+esc(c.key)+'" title="'+(c.tracked?"Tracked — click to stop tracking":"Click to track this character")+'">'+(c.tracked?"★":"☆")+"</button>"}
@@ -1556,9 +1634,10 @@ function isMaxed(t){return t&&t.max>0&&t.skill>=t.max}
 
 async function load(){
   let d;
-  try{d=await (await fetch("/api/data")).json()}catch(e){$("syncinfo").textContent="Can't reach the dashboard server — is forge_dashboard.py running?";return}
+  try{d=await (await fetch("/api/data?game="+encodeURIComponent(ui.game))).json()}catch(e){$("syncinfo").textContent="Can't reach the dashboard server — is forge_dashboard.py running?";return}
   if(d.error){$("alert").innerHTML='<div class="alert err">'+esc(d.error)+"</div>";return}
-  const first=!D;if(D&&D.synced_at!==d.synced_at)COL=null;D=d;
+  const first=!D;if(D&&D.synced_at!==d.synced_at)COL=null;D=d;CAP=D.cap||90;
+  if(!D.forever_available&&ui.game==="forever"){ui.game="retail";return load()}
   $("appver").textContent="Forge's Ledger v"+D.version+" · ";
   if(first)fillStaticOptions();
   header();render();
@@ -1577,6 +1656,21 @@ function fillStaticOptions(){
 
 function header(){
   const si=$("syncinfo");
+  $("gamesw").hidden=!D.forever_available;
+  document.querySelectorAll("#gamesw button").forEach(b=>b.classList.toggle("on",b.dataset.game===D.game));
+  $("syncbtn").hidden=D.game==="forever";
+  if(D.game==="forever"){
+    si.innerHTML="WoW Forever · "+D.characters.length+" characters · from the Forge&#39;s Ledger addon"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):"");
+    let fa="";
+    if(D.addon_error)fa+='<div class="alert err">'+esc(D.addon_error)+"</div>";
+    if(!D.characters.length)fa+='<div class="alert info">No WoW Forever characters yet. Install the addon in your Forever client (<a href="/setup" style="color:inherit">Settings</a> → Update addon), log into a character, then type <b>/fl sync</b>. Blizzard doesn&#39;t offer Forever character data yet, so everything here comes from the addon.</div>';
+    $("alert").innerHTML=fa;
+    const t=D.totals;renderGoal();
+    $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
+        :stat("—","tracked characters — click ☆ next to a name to track it")+stat("—","levels to go"))+
+      stat('<span class="goldv">'+money(t.gold_total)+"</span>","total gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days");
+    return;
+  }
   if(D.synced_at){const m=Math.round((Date.now()/1000-D.synced_at)/60);
     const shown=(D.accounts||[]).filter(a=>a.included),acctNote=shown.length&&shown.length<D.accounts.length
       ?' · showing '+shown.map(a=>esc(a.label)).join(", ")+' (<a href="/setup" style="color:inherit">change</a>)':"";
@@ -1600,7 +1694,7 @@ function header(){
   renderGoal();
   $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
       :stat("—","tracked characters — click ☆ next to a name to track it")+stat("—","levels to go"))+
-    stat('<span class="goldv">'+esc(t.gold_fmt)+"</span>",bankLine(t))+stat('<span class="goldv">'+esc(t.gold_7d_fmt)+"</span>","gold change, last 7 days");
+    stat('<span class="goldv">'+money(t.gold_total)+"</span>",bankLine(t))+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days");
 }
 function bankLine(t){
   const b=D.warband_bank;
@@ -1611,6 +1705,9 @@ function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div clas
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
+  const avail=D&&D.game==="forever"?["roster","level","classes"]:["roster","level","profs","weekly","classes","coll"];
+  if(!avail.includes(ui.tab))ui.tab="roster";
+  document.querySelectorAll(".tab").forEach(b=>b.hidden=!avail.includes(b.dataset.tab));
   ["roster","level","profs","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
   if(!D)return;
   if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
@@ -1653,8 +1750,8 @@ function renderRoster(){
       '<td class="num">'+(c.ilvl?c.ilvl:'<span class="faint">—</span>')+"</td>"+
       '<td><select class="rolesel'+(c.role?" r-"+esc(c.role):"")+'" data-key="'+esc(c.key)+'">'+roleOpts(c.role)+"</select></td>"+
       "<td>"+profPills(c)+"</td>"+
-      '<td class="num goldv">'+(c.gold?esc(fmtG(c.gold)):'<span class="faint">—</span>')+"</td>"+
-      '<td class="num">'+(chg>0?'<span style="color:var(--green)">+'+esc(fmtG(chg))+"</span>":chg<0?'<span style="color:var(--red)">−'+esc(fmtG(-chg))+"</span>":'<span class="faint">—</span>')+"</td></tr>";
+      '<td class="num goldv">'+(c.gold?money(c.gold):'<span class="faint">—</span>')+"</td>"+
+      '<td class="num">'+(chg>0?'<span style="color:var(--green)">+'+money(chg)+"</span>":chg<0?'<span style="color:var(--red)">−'+money(-chg)+"</span>":'<span class="faint">—</span>')+"</td></tr>";
   }).join("")||'<tr><td colspan="8" class="empty">No characters match these filters.</td></tr>';
   $("rcount").textContent=rows.length+" of "+D.characters.length+" characters";
 }
@@ -1752,7 +1849,7 @@ function renderClasses(){
   document.querySelectorAll("#scope button").forEach(b=>b.classList.toggle("on",b.dataset.scope===ui.scope));
   const pool=D.characters.filter(c=>(ui.scope!=="star"||c.tracked)&&(!ui.crole||c.role===ui.crole));
   const missing=[],needCap=[];
-  const cards=CLASSES.map(cls=>{
+  const cards=(D.classes||CLASSES).map(cls=>{
     const list=pool.filter(c=>c.class===cls).sort((a,b)=>b.level-a.level||a.name.localeCompare(b.name));
     const atCap=list.filter(c=>c.level>=CAP).length;
     let badge;
@@ -1873,7 +1970,7 @@ function renderGoal(){
       (g?'<button class="btn" type="button" data-goal="clear">Remove goal</button>':"")+"</form></div>";
     $("goalform").addEventListener("submit",async e=>{
       e.preventDefault();
-      try{await postJSON("/api/goal",{amount:parseInt($("gamount").value,10),deadline:$("gdate").value||null})}
+      try{await postJSON("/api/goal",{amount:parseInt($("gamount").value,10),deadline:$("gdate").value||null,game:D.game})}
       catch(err){alert(err.message);return}
       editingGoal=false;load();
     });
@@ -1885,19 +1982,19 @@ function renderGoal(){
       '<button class="btn" data-goal="edit">Set goal</button></div></div>';
     return;
   }
-  const cur=g.current/10000,rem=g.remaining/10000,done=rem<=0;
+  const done=g.remaining<=0;
   let bits=[];
   if(done)bits.push('<b class="good">Goal reached!</b>');
-  else bits.push("<b>"+gold(rem)+"</b> to go");
+  else bits.push("<b>"+money(g.remaining)+"</b> to go");
   if(g.deadline){
-    if(g.days_left>0&&!done)bits.push("by <b>"+fmtDate(g.deadline)+"</b> · "+g.days_left+" day"+(g.days_left===1?"":"s")+" left · need <b>"+gold(g.needed_per_day/10000)+"</b>/day");
+    if(g.days_left>0&&!done)bits.push("by <b>"+fmtDate(g.deadline)+"</b> · "+g.days_left+" day"+(g.days_left===1?"":"s")+" left · need <b>"+money(g.needed_per_day)+"</b>/day");
     else if(!done)bits.push('<span class="warn">Deadline ('+fmtDate(g.deadline)+") has passed</span>");
   }
   if(!done){
     if(g.pace_per_day==null)bits.push("Pace: not enough history yet — check back tomorrow");
     else{
-      const pace=g.pace_per_day/10000;
-      let p="Your pace: <b"+(pace>0?' class="good"':pace<0?' class="warn"':"")+">"+(pace>0?"+":"")+gold(pace)+"</b>/day";
+      const pace=g.pace_per_day;
+      let p="Your pace: <b"+(pace>0?' class="good"':pace<0?' class="warn"':"")+">"+signedMoney(pace)+"</b>/day";
       if(g.eta){
         const late=g.deadline&&g.eta>g.deadline;
         p+=" → reach it <b"+(late?' class="warn"':' class="good"')+">"+fmtDate(g.eta)+"</b>"+(g.deadline?(late?" (behind)":" (on track)"):"");
@@ -1906,17 +2003,17 @@ function renderGoal(){
     }
   }
   el.innerHTML='<div class="goal"><div class="gh"><div><div class="gt">Gold goal</div>'+
-    '<div class="gv"><span class="goldv">'+gold(cur)+"</span> <span>of "+gold(g.amount)+" · "+g.pct.toFixed(g.pct<10?1:0)+"%</span></div></div>"+
+    '<div class="gv"><span class="goldv">'+money(g.current)+"</span> <span>of "+money(g.amount*10000)+" · "+g.pct.toFixed(g.pct<10?1:0)+"%</span></div></div>"+
     '<button class="btn" data-goal="edit">Edit</button></div>'+
     '<div class="bar"><i style="width:'+Math.min(100,g.pct)+'%"></i></div><div class="gd">'+bits.map(b=>"<span>"+b+"</span>").join("")+"</div>"+
-    '<div class="hint">Counts gold on characters the addon has recorded, plus your warband bank. Log into an alt once to include it.</div></div>';
+    '<div class="hint">Counts gold on characters the addon has recorded'+(D.game==="forever"?"":", plus your warband bank")+'. Log into an alt once to include it.</div></div>';
 }
 async function goalAction(a){
   if(a==="edit"){editingGoal=true;renderGoal()}
   else if(a==="cancel"){editingGoal=false;renderGoal()}
   else if(a==="clear"){
     if(!confirm("Remove your gold goal?"))return;
-    try{await postJSON("/api/goal",{amount:null})}catch(e){alert(e.message);return}
+    try{await postJSON("/api/goal",{amount:null,game:D.game})}catch(e){alert(e.message);return}
     editingGoal=false;load();
   }
 }
@@ -2052,9 +2149,10 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game]");
   if(!el)return;
-  if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
+  if(el.dataset.game){if(ui.game!==el.dataset.game){ui.game=el.dataset.game;COL=null;saveUI();load()}}
+  else if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
   else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
   else if(el.dataset.goal){goalAction(el.dataset.goal)}
@@ -2275,6 +2373,19 @@ def render_setup(error=None, notice=None, form=None):
     else:
         addon_html = ('<div class="status ok">&#10003; Installed (version %s).</div>'
                       % esc(st["installed"]))
+    # WoW Forever: the same addon runs there too; installing covers both
+    forever_old = [f for f in st.get("forever", []) if f["installed"] != st["bundled"]]
+    if wow_ok and st.get("forever"):
+        if forever_old:
+            addon_html += ('<div class="status warn">WoW Forever: %s.</div>'
+                           % ("not installed" if not forever_old[0]["installed"]
+                              else "version %s installed - %s is available"
+                              % (esc(forever_old[0]["installed"]), esc(st["bundled"]))))
+            if st["installed"] == st["bundled"]:  # retail is current: offer the button here
+                addon_html += '<div class="row">' + install_btn % "Install for WoW Forever" + '</div>'
+        else:
+            addon_html += ('<div class="status ok">&#10003; WoW Forever: installed (version %s).</div>'
+                           % esc(st["bundled"]))
 
     alerts = ""
     if error:
@@ -2366,7 +2477,12 @@ def addon_status(wow_path):
               if wow_path else None)
     dest = os.path.join(addons, ADDON_FOLDER) if addons else None
     old = os.path.join(addons, OLD_ADDON_FOLDER) if addons else None
+    forever = []
+    for client in forever_clients(wow_path) if wow_path else []:
+        fdest = os.path.join(client, "Interface", "AddOns", ADDON_FOLDER)
+        forever.append({"dest": fdest, "installed": _toc_version(fdest)})
     return {"installed": _toc_version(dest) if dest else None,
+            "forever": forever,  # one entry per installed Forever client
             # the pre-rename "Forge Gold Tracker" addon, if still installed
             "old_installed": _toc_version(old, OLD_ADDON_FOLDER) if old else None,
             "bundled": _toc_version(ADDON_BUNDLE), "dest": dest, "old": old}
@@ -2414,6 +2530,9 @@ def install_addon(wow_path):
                            "addon's new name, which can't be done while the "
                            "game is open.")
     shutil.copytree(ADDON_BUNDLE, st["dest"], dirs_exist_ok=True)
+    # the same addon also runs in WoW Forever (it declares both games)
+    for f in st["forever"]:
+        shutil.copytree(ADDON_BUNDLE, f["dest"], dirs_exist_ok=True)
     for old_f, new_f in to_migrate:
         shutil.copy2(old_f, new_f)
         print("Migrated addon data: %s -> %s" % (old_f, new_f), flush=True)
@@ -2551,16 +2670,84 @@ def build_api_data():
             "at_cap": at_cap,
             "levels_remaining": levels_remaining,
             "gold_fmt": fmt_gold(gold_total),
+            "gold_total": gold_total, "gold_7d": gold_7d,  # exact, in copper
             "characters_gold_fmt": fmt_gold(chars_total),
             "gold_7d_fmt": ("+" if gold_7d > 0 else "-") + fmt_gold(abs(gold_7d))
             if gold_7d != 0 else "—",
         },
         "gold_goal": gold_goal_status(settings["gold_goal"], goal_series, gold_total),
+        "game": "retail", "cap": CAP, "classes": ALL_CLASSES,
+        "forever_available": bool(forever_clients()),
         "warband_bank": ({"money": bank, "fmt": fmt_gold(bank),
                           "updated": max(w["updated"] for w in warbands.values()),
                           "gold_7d": bank_7d}
                          if warbands else None),
         "accounts": accounts_info(cache, settings),
+    }
+
+
+def build_forever_data():
+    """Dashboard data for WoW Forever, from the addon's save files only.
+
+    Forever characters are kept apart from retail: their keys are prefixed
+    "forever:" (so tracking/roles never collide with a retail character of
+    the same name), and they have their own gold goal. The Settings account
+    picker applies here too, matched by account folder name."""
+    settings, roles = load_settings(), load_roles()
+    tracked_keys = set(settings["tracked"])
+    picked = set(settings.get("accounts") or [])
+    _labels, folder_ids = account_labels(load_cache().get("characters", []))
+    gold, addon_error = {}, None
+    try:
+        for client in forever_clients():
+            g, _path, _warbands = load_gold(client)  # no warband bank in Forever
+            gold.update(g)
+    except Exception as e:
+        addon_error = "Couldn't read the Forever addon save file (%s)." % e
+    chars = []
+    for key, g in gold.items():
+        aid = folder_ids.get(g.get("folder"))
+        if picked and aid is not None and aid not in picked:
+            continue
+        k = "forever:" + key
+        c = {"key": k, "name": g["name"], "realm": g["realm"], "realm_slug": "",
+             "level": g.get("level", 0),
+             "class": CLASS_TOKENS.get(g.get("class", ""), g.get("class", "").title()),
+             "faction": g.get("faction", ""), "professions": [], "cooldowns": [],
+             "gold": g.get("money", 0), "gold_7d": gold_7d_change(g.get("history", [])),
+             "last_login": g.get("last_seen", 0),
+             "tracked": k in tracked_keys, "role": roles.get(k, "")}
+        if g.get("rested") is not None and g.get("xp_max") and c["level"] < FOREVER_CAP:
+            c["rested"] = {"pct": min(150, round(g["rested"] * 100.0 / g["xp_max"])),
+                           "at": g.get("last_seen", 0)}
+        chars.append(c)
+    chars.sort(key=lambda c: (not c["tracked"], -(c.get("level") or 0), c["name"].lower()))
+    tracked = [c for c in chars if c["tracked"]]
+    total = sum(c["gold"] for c in chars)
+    gold_7d = sum(c["gold_7d"] for c in chars)
+    shown = {c["key"][len("forever:"):] for c in chars}
+    classes = FOREVER_CLASSES + sorted({c["class"] for c in chars} - set(FOREVER_CLASSES) - {""})
+    return {
+        "game": "forever", "cap": FOREVER_CAP, "classes": classes,
+        "forever_available": True,
+        "synced_at": 0, "connected": is_connected(), "syncing": STATE["syncing"],
+        "sync_error": None, "sv_path": find_sv_file(), "sv_mtime": STATE["sv_mtime"],
+        "addon_error": addon_error, "characters": chars, "catalog_totals": {},
+        "expansions": [{"short": s2, "full": f} for s2, f, _p in EXPANSIONS],
+        "roles": ROLES, "version": APP_VERSION, "update": update_available(),
+        "weekly": weekly_state(settings), "warband_bank": None,
+        "accounts": accounts_info(load_cache(), settings),
+        "totals": {
+            "tracked": len(tracked),
+            "at_cap": sum(1 for c in tracked if (c.get("level") or 0) >= FOREVER_CAP),
+            "levels_remaining": sum(max(0, FOREVER_CAP - (c.get("level") or 0)) for c in tracked),
+            "gold_fmt": fmt_gold(total), "characters_gold_fmt": fmt_gold(total),
+            "gold_total": total, "gold_7d": gold_7d,  # exact, in copper
+            "gold_7d_fmt": ("+" if gold_7d > 0 else "-") + fmt_gold(abs(gold_7d))
+            if gold_7d != 0 else "—",
+        },
+        "gold_goal": gold_goal_status(settings.get("forever_gold_goal"),
+                                      {k: g for k, g in gold.items() if k in shown}, total),
     }
 
 
@@ -2708,7 +2895,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/data":
             try:
-                self.send_json(build_api_data())
+                game = (qs.get("game") or ["retail"])[0]
+                self.send_json(build_forever_data() if game == "forever"
+                               else build_api_data())
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
             return
@@ -2892,8 +3081,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "bad request"}, 400)
                 return
             s = load_settings()
+            # retail and Forever economies don't mix: one goal per game
+            gkey = "forever_gold_goal" if req.get("game") == "forever" else "gold_goal"
             if not req.get("amount"):
-                s["gold_goal"] = None  # clearing the goal
+                s[gkey] = None  # clearing the goal
             else:
                 try:
                     amount = int(req["amount"])
@@ -2906,7 +3097,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json({"error": "Goal must be a positive number "
                                     "of gold and a valid date."}, 400)
                     return
-                s["gold_goal"] = {"amount": amount, "deadline": deadline}
+                s[gkey] = {"amount": amount, "deadline": deadline}
             save_settings(s)
             self.send_json({"ok": True})
             return

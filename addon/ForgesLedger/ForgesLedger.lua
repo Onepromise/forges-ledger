@@ -1,4 +1,7 @@
--- Forge's Ledger addon v2.2 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.3 (formerly Forge Gold Tracker)
+-- One addon for both retail (Midnight) and WoW Forever: every modern-only
+-- feature (warband bank, profession cooldowns) checks the game supports it
+-- first and quietly switches off where it doesn't.
 -- Records each character's gold (plus class/level/faction and a daily
 -- history), and the account's warband bank gold, into SavedVariables for Forge's Ledger running on this PC.
 --
@@ -15,7 +18,7 @@
 -- Nothing is sent anywhere. All data stays on your PC.
 
 local ADDON_NAME = "ForgesLedger"
-local VERSION = "2.2"
+local VERSION = "2.3"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)

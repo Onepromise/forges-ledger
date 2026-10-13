@@ -35,7 +35,8 @@ replaced each time you sync, and **automatically deleted once it is more than
 - Gold held per character (with a daily history), plus each character's
   level, class, faction, rested XP and profession cooldown timers, and your
   account's warband bank gold (with a daily history), recorded by the free
-  Forge's Ledger in-game addon.
+  Forge's Ledger in-game addon — in retail World of Warcraft and in
+  World of Warcraft: Forever.
 - Read from the addon's local SavedVariables file on your computer.
 - Never leaves your computer.
 
