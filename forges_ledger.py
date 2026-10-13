@@ -514,8 +514,8 @@ def fmt_gold(copper):
         copper = int(copper)
     except (TypeError, ValueError):
         copper = 0
-    g = copper // 10000
-    return "{:,}g".format(g) if g < 1000000 else "%.2fm" % (g / 1000000.0)
+    # exact whole gold with thousands separators (silver/copper dropped)
+    return "{:,}g".format(copper // 10000)
 
 
 # -------------------------------------------------------------- blizzard ---
@@ -1278,7 +1278,8 @@ function readUI(){try{return JSON.parse(localStorage.getItem("forgeUI")||"{}")}c
 function saveUI(){try{localStorage.setItem("forgeUI",JSON.stringify(ui))}catch(e){}}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function $(id){return document.getElementById(id)}
-function fmtG(c){c=Math.round((c||0)/10000);if(Math.abs(c)>=1e6)return (c/1e6).toFixed(2)+"m";return c.toLocaleString()+"g"}
+// exact whole gold, dropping silver/copper - matches the server's fmt_gold
+function fmtG(c){return Math.trunc((c||0)/10000).toLocaleString()+"g"}
 function cc(cls){return CLASS_COLORS[cls]||"var(--txt)"}
 function roleChip(r){return r?'<span class="role r-'+esc(r)+'">'+esc(r)+"</span>":""}
 function nameHtml(c){return '<span class="cn" style="color:'+cc(c.class)+'">'+esc(c.name)+'</span> <button class="trk'+(c.tracked?" on":"")+'" data-track="'+esc(c.key)+'" title="'+(c.tracked?"Tracked — click to stop tracking":"Click to track this character")+'">'+(c.tracked?"★":"☆")+"</button>"}
