@@ -10,19 +10,50 @@ tracking. See [PRIVACY.md](PRIVACY.md).
 
 ## Features
 
-- **Roster** — every character with level, item level, last played, role
-  tags (Main, Farmer, Crafter, Bank, Leveling, Alt), professions, and gold.
-  Star (☆) the characters you want to track.
-- **Professions** — skill per expansion (Classic through Midnight) for every
-  character, with the recipes each one knows and the ones they're missing.
-- **Classes** — which classes you have, which are missing, and which have no
-  max-level character yet.
-- **Collections** — mounts, battle pets, and achievement progress by category.
-- **Gold** — per-character gold, warband bank gold, totals, 7-day change, and a gold goal
-  with an optional deadline, daily target, and projected finish date.
-- **Live updates** — the companion addon's Sync button, a keybind, or
-  `/fl sync` updates the dashboard within seconds. It also refreshes from
-  Blizzard on startup and hourly.
+**Roster** — every character with level, item level, last played, role tags
+(Main, Farmer, Crafter, Bank, Leveling, Alt), professions, and gold. Star (☆)
+the characters you want to track. The top of every tab shows your total gold
+(characters + warband bank) and your gold goal, with the daily target and
+projected finish date.
+
+![Roster](docs/screenshots/roster.png)
+
+**Leveling** — "who do I play tonight": every character below max level,
+ranked with Leveling-tagged characters first, then fewest levels to go, then
+most rested.
+
+![Leveling](docs/screenshots/leveling.png)
+
+**Professions** — skill per expansion (Classic through Midnight) for every
+character, with the recipes each one knows and the ones they're missing.
+
+![Professions](docs/screenshots/professions.png)
+
+**Gap planner** — every character × profession pair that isn't maxed for
+Midnight yet, Crafter-tagged characters first, with the totals per profession.
+
+![Gap planner](docs/screenshots/planner.png)
+
+**Weekly** — a per-character checklist (Great Vault, world boss, weekly
+quests) that clears itself at the weekly reset, plus profession cooldowns
+filled in automatically by the addon.
+
+![Weekly](docs/screenshots/weekly.png)
+
+**Classes** — which classes you have, which are missing, and which have no
+max-level character yet.
+
+![Classes](docs/screenshots/classes.png)
+
+**Collections** — mounts, battle pets, and achievement progress by category.
+
+![Achievements](docs/screenshots/achievements.png)
+
+**Live updates** — the addon's Sync button, a keybind, or `/fl sync` updates
+the dashboard within seconds. It also refreshes from Blizzard on startup and
+hourly, and tells you when a new version of the app is out.
+
+*Screenshots use example data with made-up character names.*
 
 ## Getting started
 

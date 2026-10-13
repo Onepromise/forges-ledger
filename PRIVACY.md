@@ -33,16 +33,17 @@ replaced each time you sync, and **automatically deleted once it is more than
 
 ### 2. Companion Addon Data
 - Gold held per character (with a daily history), plus each character's
-  level, class and faction, and your account's warband bank gold (with a
-  daily history), recorded by the free Forge's Ledger in-game addon.
+  level, class, faction, rested XP and profession cooldown timers, and your
+  account's warband bank gold (with a daily history), recorded by the free
+  Forge's Ledger in-game addon.
 - Read from the addon's local SavedVariables file on your computer.
 - Never leaves your computer.
 
 ### 3. Your Settings
 - Roles you assign to characters (for example "Farmer" or "Main"), stored
   locally in `forge_dashboard_roles.json`.
-- Which characters you track (★) and your gold goal, stored locally in
-  `forge_dashboard_settings.json`.
+- Which characters you track (★), your gold goal, and your weekly checklist
+  checkmarks, stored locally in `forge_dashboard_settings.json`.
 
 ### 4. Credentials
 - Your Blizzard API client ID and secret (which you create yourself on
@@ -79,6 +80,11 @@ computer.
 - **Blizzard Entertainment:** the app calls Blizzard's official API to fetch
   your character data. This is governed by Blizzard's own privacy policy in
   addition to this one.
+- **GitHub:** once a day the app asks GitHub whether a newer version of
+  Forge's Ledger has been released. The request contains no personal or game
+  data — only the app's version number. GitHub, like any website, sees your
+  IP address; see GitHub's privacy statement. The result is stored locally in
+  `update_check.json`. The app never downloads or installs updates by itself.
 - **Patreon (premium tier only):** used solely to verify an active membership.
 - We do not sell, license, or transfer your data — or any data derived from
   it — to any third party, including advertisers or data brokers.

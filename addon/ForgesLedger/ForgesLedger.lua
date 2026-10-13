@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.0 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.1 (formerly Forge Gold Tracker)
 -- Records each character's gold (plus class/level/faction and a daily
 -- history), and the account's warband bank gold, into SavedVariables for Forge's Ledger running on this PC.
 --
@@ -15,7 +15,7 @@
 -- Nothing is sent anywhere. All data stays on your PC.
 
 local ADDON_NAME = "ForgesLedger"
-local VERSION = "2.0"
+local VERSION = "2.1"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -72,6 +72,10 @@ local function Snapshot()
     c.faction = UnitFactionGroup("player") or "Neutral"
     c.name    = UnitName("player") or key
     c.lastSeen = now
+    -- rested XP pool and the XP needed for this level, for the app's
+    -- "what do I level tonight" view (0 = not rested)
+    c.restedXP = GetXPExhaustion() or 0
+    c.xpMax    = UnitXPMax("player") or 0
 
     c.history = c.history or {}
     RecordDay(c.history, money, today)
@@ -116,6 +120,53 @@ local function SnapshotWarband()
     w.history = w.history or {}
     RecordDay(w.history, amount, date("%Y-%m-%d", now))
     ForgeGoldDB.warband = w
+end
+
+-- Profession cooldowns (e.g. daily transmutes). The game only reports
+-- cooldowns for the profession whose window is open, so we read them when
+-- you open a profession window or craft. A recipe whose cooldown is ready
+-- reports no cooldown at all, so we can only learn a recipe HAS one after
+-- you've used it once; from then on it's tracked (readyAt in the past =
+-- ready to use again). Everything is pcall-guarded so a changed API can't
+-- break the rest of the addon.
+local cooldownScanQueued = false
+
+local function ScanCooldowns()
+    cooldownScanQueued = false
+    local T = C_TradeSkillUI
+    if not (T and T.GetAllRecipeIDs and T.GetRecipeCooldown and T.GetRecipeInfo
+            and T.GetBaseProfessionInfo) then
+        return
+    end
+    local okP, prof = pcall(T.GetBaseProfessionInfo)
+    local profName = okP and type(prof) == "table" and prof.professionName
+    if not profName or profName == "" then return end
+    local ok, ids = pcall(T.GetAllRecipeIDs)
+    if not ok or type(ids) ~= "table" then return end
+    local c = ForgeGoldDB.chars and ForgeGoldDB.chars[CharKey()]
+    if not c then return end
+    c.cooldowns = c.cooldowns or {}
+    local now = time()
+    for _, id in ipairs(ids) do
+        local okI, info = pcall(T.GetRecipeInfo, id)
+        if okI and type(info) == "table" and info.learned then
+            local okC, cd = pcall(T.GetRecipeCooldown, id)
+            if okC and type(cd) == "number" and cd > 0 then
+                c.cooldowns[tostring(id)] = {
+                    name = info.name, profession = profName,
+                    readyAt = now + math.floor(cd),
+                }
+                dirty = true
+            end
+        end
+    end
+end
+
+-- the list-update event fires in bursts; scan once, a moment after it settles
+local function QueueCooldownScan()
+    if cooldownScanQueued then return end
+    cooldownScanQueued = true
+    C_Timer.After(1, ScanCooldowns)
 end
 
 -- Global so the keybinding in Bindings.xml can call it.
@@ -200,8 +251,11 @@ frame:RegisterEvent("PLAYER_MONEY")
 frame:RegisterEvent("PLAYER_LEVEL_UP")
 frame:RegisterEvent("PLAYER_LOGOUT")
 frame:RegisterEvent("BANKFRAME_OPENED")
--- warband bank balance changed; pcall in case a client doesn't have it
-pcall(frame.RegisterEvent, frame, "ACCOUNT_MONEY")
+-- pcall: in case a client doesn't have one of these events
+pcall(frame.RegisterEvent, frame, "ACCOUNT_MONEY")          -- warband bank changed
+pcall(frame.RegisterEvent, frame, "UPDATE_EXHAUSTION")      -- rested XP changed
+pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")       -- profession opened
+pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
@@ -223,6 +277,10 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_MONEY" then
         Snapshot()
         UpdateButton()
+    elseif event == "UPDATE_EXHAUSTION" then
+        Snapshot()
+    elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_LIST_UPDATE" then
+        QueueCooldownScan()
     elseif event == "ACCOUNT_MONEY" then
         SnapshotWarband()
         UpdateButton()

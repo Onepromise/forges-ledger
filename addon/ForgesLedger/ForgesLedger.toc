@@ -2,6 +2,6 @@
 ## Title: Forge's Ledger
 ## Notes: Records each character's gold and your warband bank gold for the Forge's Ledger app on this PC. Click the Sync button, use the keybind, or type /fl sync to update the app immediately.
 ## Author: Forge
-## Version: 2.0
+## Version: 2.1
 ## SavedVariables: ForgeGoldDB
 ForgesLedger.lua

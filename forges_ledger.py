@@ -457,6 +457,18 @@ def _history(raw):
     return sorted(out, key=lambda h: h["day"])
 
 
+def _cooldowns(raw):
+    """Profession cooldowns the addon recorded: [{name, profession, ready_at}].
+    Keys/values are checked because this comes from a user-editable file."""
+    out = []
+    for cd in (raw.values() if isinstance(raw, dict) else raw or []):
+        if isinstance(cd, dict) and isinstance(cd.get("readyAt"), (int, float)):
+            out.append({"name": str(cd.get("name") or "Cooldown"),
+                        "profession": str(cd.get("profession") or ""),
+                        "ready_at": int(cd["readyAt"])})
+    return sorted(out, key=lambda c: (c["profession"], c["name"]))
+
+
 def load_gold():
     """Read the addon's save file.
 
@@ -486,6 +498,11 @@ def load_gold():
             "class": c.get("class", ""),
             "faction": c.get("faction", ""),
             "history": _history(c.get("history")),
+            # addon v2.1+; older addon versions simply don't have these
+            "rested": c.get("restedXP"),
+            "xp_max": c.get("xpMax"),
+            "last_seen": c.get("lastSeen", 0) or 0,
+            "cooldowns": _cooldowns(c.get("cooldowns")),
         }
     w = db.get("warband")
     warband = None
@@ -1022,6 +1039,10 @@ def auto_sync_loop():
     time.sleep(5)  # let the server finish starting first
     while True:
         try:
+            check_for_update()  # no-op unless a day has passed
+        except Exception:
+            pass
+        try:
             age = time.time() - load_cache().get("synced_at", 0)
             if age >= AUTO_SYNC_EVERY and has_credentials() and not STATE["syncing"]:
                 print("Auto-sync: Blizzard data is %d min old." % (age // 60),
@@ -1055,6 +1076,112 @@ def watch_addon_file():
             # WoW may be mid-write; the next tick will see the finished file
             print("Addon watcher: %s" % e, flush=True)
         time.sleep(2)
+
+
+# ----------------------------------------------------------- app update ---
+#
+# Once a day, ask GitHub for the newest release and tell the user if it's
+# newer than this build. Notify + link only - never download or install
+# anything (the .exe isn't code-signed, so silent installs would be a red
+# flag). Offline, rate-limited, or the repo still private (GitHub answers
+# 404 without a login) all just mean "no update info": no banner, no error.
+
+UPDATE_REPO = "Onepromise/forges-ledger"
+UPDATE_PATH = os.path.join(BASE_DIR, "update_check.json")
+UPDATE_EVERY = 86400
+
+
+def parse_version(tag):
+    """'v0.10.0' -> (0, 10, 0) so versions compare numerically, not as text
+    (as text, '0.10.0' would sort before '0.2.1')."""
+    m = re.match(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(tag or "").strip())
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def _read_update_state():
+    try:
+        with open(UPDATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def check_for_update(force=False):
+    state = _read_update_state()
+    if not force and time.time() - state.get("checked_at", 0) < UPDATE_EVERY:
+        return state
+    # The releases LIST, not /releases/latest: "latest" skips pre-releases,
+    # and every release so far is a pre-release.
+    url = "https://api.github.com/repos/%s/releases?per_page=20" % UPDATE_REPO
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ForgesLedger/" + APP_VERSION})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            releases = json.load(r)
+        best = None
+        for rel in releases if isinstance(releases, list) else []:
+            v = parse_version(rel.get("tag_name"))
+            if rel.get("draft") or not v:
+                continue
+            if best is None or v > best[0]:
+                best = (v, rel.get("tag_name"), rel.get("html_url", ""))
+        state = {"checked_at": int(time.time()),
+                 "latest": best[1] if best else None,
+                 "url": best[2] if best else None}
+    except urllib.error.HTTPError:
+        # 404 = repo private (or gone), 403 = rate limited: no update info
+        state = {"checked_at": int(time.time()), "latest": None, "url": None}
+    except (OSError, ValueError):
+        return state  # offline or a garbled reply: try again next time
+    try:
+        with open(UPDATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+    return state
+
+
+def update_available():
+    st = _read_update_state()
+    latest, current = parse_version(st.get("latest")), parse_version(APP_VERSION)
+    url = st.get("url") or ""
+    # only ever link to this project's own release pages
+    if (latest and current and latest > current
+            and url.startswith("https://github.com/%s/releases/" % UPDATE_REPO)):
+        return {"version": str(st["latest"]).lstrip("v"), "url": url}
+    return None
+
+
+# -------------------------------------------------------- weekly checklist ---
+#
+# Manual checkmarks (Great Vault, world boss, weekly quests) are stored with
+# the id of the week they belong to; when the week rolls over they're
+# cleared. Profession cooldowns aren't stored here - they're read live from
+# the addon, so "used" just means "currently on cooldown".
+
+WEEKLY_ITEMS = [("vault", "Great Vault"), ("worldboss", "World boss"),
+                ("quests", "Weekly quests")]
+# US weekly reset: Tuesday 15:00 UTC (7am Pacific standard / 8am daylight).
+# Any past reset moment works as the anchor; weeks count from it.
+RESET_ANCHOR = datetime.datetime(2026, 1, 6, 15, 0, tzinfo=datetime.timezone.utc)
+
+
+def week_id(now=None):
+    now = now if now is not None else time.time()
+    return int((now - RESET_ANCHOR.timestamp()) // (7 * 86400))
+
+
+def next_reset(now=None):
+    now = now if now is not None else time.time()
+    return int(RESET_ANCHOR.timestamp() + (week_id(now) + 1) * 7 * 86400)
+
+
+def weekly_state(settings):
+    w = settings.get("weekly") or {}
+    checks = w.get("checks", {}) if w.get("week") == week_id() else {}
+    return {"items": [{"id": i, "label": l} for i, l in WEEKLY_ITEMS],
+            "checks": checks, "next_reset": next_reset()}
 
 
 # ------------------------------------------------------------------ web ---
@@ -1180,6 +1307,16 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 .goal form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:12px}
 .goal label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim)}
 .good{color:var(--green) !important}.warn{color:var(--amber) !important}
+.picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px}
+.pick{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.pick:first-child{border-color:#3b4a8a;background:#171c2b}
+.pick .pk{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.pick .pn{font-size:17px;margin-top:4px}.pick .pv{margin-top:8px;font-size:14px}.pick .pv b{font-size:20px}
+.pick .pr{margin-top:6px;font-size:12px;min-height:18px}
+.psum{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+.pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px}
+.pcard .pt{font-weight:600}.pcard .pv2{margin-top:2px}
+input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
 .names{columns:4 220px;column-gap:24px;font-size:13px;padding:14px 18px}
 .names div{padding:3px 0;break-inside:avoid;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .names div.miss{color:var(--dim)}
@@ -1204,7 +1341,9 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 
 <nav class="tabs">
   <button class="tab" data-tab="roster">Roster</button>
+  <button class="tab" data-tab="level">Leveling</button>
   <button class="tab" data-tab="profs">Professions</button>
+  <button class="tab" data-tab="weekly">Weekly</button>
   <button class="tab" data-tab="classes">Classes</button>
   <button class="tab" data-tab="coll">Collections</button>
 </nav>
@@ -1227,12 +1366,34 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
     <tbody id="roster"></tbody></table></div>
 </section>
 
+<section id="tab-level" hidden>
+  <div class="controls">
+    <label class="chk"><input type="checkbox" id="lvstar"> ★ Tracked only</label>
+    <label class="chk"><input type="checkbox" id="lv10"> Level 10+</label>
+    <span class="count" id="lvcount"></span>
+  </div>
+  <div class="picks" id="lvnext"></div>
+  <div class="card scroll"><table id="lvtable"></table></div>
+  <div class="hint">Characters tagged <b>Leveling</b> come first, then whoever is closest to max level, then the most rested. Rested XP is the amount when the addon last saw the character; it keeps growing while they rest.</div>
+</section>
+
+<section id="tab-weekly" hidden>
+  <div class="controls">
+    <div class="seg" id="wscope"><button data-wscope="cap">Tracked at max level</button><button data-wscope="all">All tracked</button></div>
+    <span class="count" id="wcount"></span>
+  </div>
+  <div class="card scroll"><table id="wtable"></table></div>
+  <div class="hint">Checkmarks clear at the weekly reset (Tuesday, US). Profession cooldowns fill in by themselves from the addon: green = used and cooling down, otherwise ready.</div>
+</section>
+
 <section id="tab-profs" hidden>
   <div class="controls">
     <select id="profsel"></select>
     <label class="chk"><input type="checkbox" id="pstar"> ★ Tracked only</label>
+    <label class="chk" id="psecwrap"><input type="checkbox" id="psec"> Include Cooking &amp; Fishing</label>
     <span class="count" id="pcount"></span>
   </div>
+  <div id="plansum" hidden></div>
   <div class="card scroll"><table class="matrix" id="matrix"></table></div>
   <div class="hint" id="phint"></div>
 </section>
@@ -1258,7 +1419,7 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 </section>
 
 <div class="note">Gold comes from the Forge's Ledger addon save file on this PC (re-read on every page load).
-Levels, professions and recipes come from the Blizzard API when you sync. Roles are saved in forge_dashboard_roles.json next to the script.
+Levels, professions and recipes come from the Blizzard API when you sync. Roles, tracked characters, your goal and weekly checkmarks are saved in your Forge&#39;s Ledger data folder.
 <span id="appver"></span>Blizzard data older than 30 days is deleted automatically. <a href="/privacy" target="_blank" style="color:inherit">Privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
 World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.</div>
@@ -1272,9 +1433,18 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap"},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
+// Open straight to a tab from the address, e.g. localhost:8765/#weekly -
+// handy for bookmarks (and how the README screenshots are taken).
+(function(){
+  const h=location.hash.slice(1),tabs=["roster","level","profs","weekly","classes","coll"];
+  const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"]};
+  if(tabs.includes(h))ui.tab=h;
+  else if(extra[h]){ui.tab=extra[h][0];extra[h][1](ui)}
+})();
+function readDismissed(){try{return localStorage.getItem("dismissedUpdate")}catch(e){return null}}
 function readUI(){try{return JSON.parse(localStorage.getItem("forgeUI")||"{}")}catch(e){return {}}}
 function saveUI(){try{localStorage.setItem("forgeUI",JSON.stringify(ui))}catch(e){}}
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -1307,6 +1477,7 @@ function fillStaticOptions(){
   $("crole").innerHTML+=roleOpts;
   $("q").value=ui.q;$("fcls").value=ui.cls;$("frole").value=ui.role;$("fstar").checked=ui.star;$("flvl").checked=ui.lvl;
   $("pstar").checked=ui.pstar;$("crole").value=ui.crole;$("cq").value=ui.cq;
+  $("lvstar").checked=ui.lvstar;$("lv10").checked=ui.lv10;$("psec").checked=ui.psec;
 }
 
 function header(){
@@ -1319,6 +1490,9 @@ function header(){
   if(!D.connected&&!D.characters.length)a+='<div class="alert err">Not connected to Battle.net — click <b>Connect Battle.net</b> and approve at Blizzard to load your characters.</div>';
   else if(!D.connected)a+='<div class="alert info">Your Battle.net login has expired (Blizzard logins last 24 hours). Character details still update every hour — click <b>Connect Battle.net</b> to also pick up new characters, mounts and pets.</div>';
   if(D.addon_error)a+='<div class="alert err">'+esc(D.addon_error)+" Gold is hidden until it's fixed; everything else still works.</div>";
+  if(D.update&&readDismissed()!==D.update.version)a+='<div class="alert ok">Forge&#39;s Ledger <b>v'+esc(D.update.version)+'</b> is available. '+
+    '<a href="'+esc(D.update.url)+'" target="_blank" rel="noopener" style="color:inherit"><b>See what&#39;s new and download</b></a> · '+
+    '<a href="#" data-dismiss-update="'+esc(D.update.version)+'" style="color:inherit">Not now</a></div>';
   if(D.sync_error)a+='<div class="alert err">Last sync failed: '+esc(D.sync_error)+"</div>";
   if(D.syncing)a+='<div class="alert info">Syncing with Blizzard… the first sync with recipe lists takes a few minutes. This page refreshes on its own.</div>';
   const legacy=D.characters.some(c=>c.professions.some(p=>p.tiers.length===1&&p.tiers[0].id==null&&p.tiers[0].recipes.length===0&&p.tiers[0].name));
@@ -1340,9 +1514,9 @@ function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div clas
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
-  ["roster","profs","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
+  ["roster","level","profs","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
   if(!D)return;
-  if(ui.tab==="roster")renderRoster();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
+  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
   saveUI();
 }
 
@@ -1408,10 +1582,13 @@ function recCount(t){
 }
 function renderProfs(){
   const idx=profIndex(),names=Object.keys(idx).sort();
-  if(ui.prof&&!idx[ui.prof])ui.prof="";
-  $("profsel").innerHTML='<option value="">Overview — all professions</option>'+
+  if(ui.prof&&ui.prof!=="__planner"&&!idx[ui.prof])ui.prof="";
+  $("plansum").hidden=true;$("psecwrap").hidden=ui.prof!=="__planner";
+  $("profsel").innerHTML='<option value="__planner"'+(ui.prof==="__planner"?" selected":"")+'>Gap planner — Midnight</option>'+
+    '<option value="">Overview — all professions</option>'+
     names.map(n=>'<option value="'+esc(n)+'"'+(n===ui.prof?" selected":"")+">"+esc(n)+" · "+idx[n].length+" character"+(idx[n].length===1?"":"s")+"</option>").join("");
   if(!names.length){$("matrix").innerHTML='<tbody><tr><td class="empty">No profession data yet — hit Sync now.</td></tr></tbody>';$("pcount").textContent="";$("phint").textContent="";return}
+  if(ui.prof==="__planner")return renderPlanner();
   ui.prof?renderProfDetail(ui.prof,idx[ui.prof]):renderProfOverview(idx,names);
 }
 function renderProfOverview(idx,names){
@@ -1647,6 +1824,110 @@ async function goalAction(a){
   }
 }
 
+/* ---------------- leveling: who do I play tonight ---------------- */
+// Ranking: characters tagged "Leveling" first, then fewest levels to go,
+// then most rested. Real numbers only - no time estimates.
+function levelRows(){
+  return D.characters.filter(c=>(c.level||0)>0&&c.level<CAP&&(!ui.lvstar||c.tracked)&&(!ui.lv10||c.level>=10))
+    .sort((a,b)=>((b.role==="Leveling")-(a.role==="Leveling"))||((CAP-a.level)-(CAP-b.level))||
+      ((b.rested?b.rested.pct:0)-(a.rested?a.rested.pct:0))||a.name.localeCompare(b.name));
+}
+function restedCell(c){
+  if(!c.rested)return '<span class="faint" title="Update the addon to v2.1 and log into this character to record rested XP">—</span>';
+  if(!c.rested.pct)return '<span class="faint">not rested</span>';
+  return '<b class="good">'+c.rested.pct+'%</b> <span class="faint">of a level · '+ago(c.rested.at)+"</span>";
+}
+function renderLevel(){
+  const rows=levelRows(),toGo=rows.reduce((s,c)=>s+(CAP-c.level),0);
+  $("lvcount").textContent=rows.length+" character"+(rows.length===1?"":"s")+" below "+CAP+" · "+toGo.toLocaleString()+" levels to go";
+  if(!rows.length){
+    const none=ui.lvstar&&!D.characters.some(c=>c.tracked);
+    $("lvnext").innerHTML="";
+    $("lvtable").innerHTML='<tbody><tr><td class="empty">'+(none
+      ?'You aren&#39;t tracking any characters yet. Star (☆) the ones you&#39;re leveling on the Roster tab, or turn off "Tracked only".'
+      :'Nobody to level here — everyone is '+CAP+'.'+(ui.lvstar?' Turn off "Tracked only" to see all characters.':''))+"</td></tr></tbody>";
+    return}
+  $("lvnext").innerHTML=rows.slice(0,3).map((c,i)=>'<div class="pick"><div class="pk">'+(i?"Then":"Up next")+'</div><div class="pn">'+nameHtml(c)+'</div>'+
+    '<div class="realm">'+esc(c.realm)+" · "+esc(c.class)+'</div><div class="pv"><b>'+(CAP-c.level)+'</b> level'+(CAP-c.level===1?"":"s")+" to go <span class=\"dim\">(level "+c.level+")</span></div>"+
+    '<div class="pr">'+(c.rested&&c.rested.pct?'<span class="good">'+c.rested.pct+"% rested</span>":"")+(c.role?" "+roleChip(c.role):"")+"</div></div>").join("");
+  $("lvtable").innerHTML="<thead><tr><th class=num>#</th><th>Character</th><th>Level</th><th class=num>To go</th><th>Rested</th><th>Role</th><th>Last played</th></tr></thead><tbody>"+
+    rows.map((c,i)=>{const pct=Math.round(c.level/CAP*100);
+      return '<tr><td class="num dim">'+(i+1)+"</td><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+'</div></td><td><div class="lvl"><div class="bar"><i style="width:'+pct+'%"></i></div><b>'+c.level+'</b></div></td>'+
+        '<td class="num"><b>'+(CAP-c.level)+"</b></td><td>"+restedCell(c)+"</td><td>"+roleChip(c.role)+'</td><td class="dim">'+(c.last_login?ago(c.last_login):"—")+"</td></tr>"}).join("")+"</tbody>";
+}
+
+/* ---------------- profession gap planner (Midnight) ---------------- */
+const SECONDARY=new Set(["Cooking","Fishing"]);
+function plannerPairs(){
+  // Midnight max per profession, learned from any character that has the tier,
+  // so characters who haven't started Midnight yet still get a real gap
+  const mid={};
+  D.characters.forEach(c=>c.professions.forEach(p=>p.tiers.forEach(t=>{if(t.exp==="Midnight"&&t.max)mid[p.name]=Math.max(mid[p.name]||0,t.max)})));
+  const pairs=[];
+  D.characters.forEach(c=>{
+    if(ui.pstar&&!c.tracked)return;
+    c.professions.forEach(p=>{
+      if(p.name==="Archaeology"||(!ui.psec&&SECONDARY.has(p.name)))return;
+      const t=p.tiers.find(t=>t.exp==="Midnight"),max=(t&&t.max)||mid[p.name]||0,skill=t?t.skill:0;
+      pairs.push({c,p:p.name,skill,max,gap:max?Math.max(0,max-skill):null,started:skill>0});
+    });
+  });
+  return pairs;
+}
+function renderPlanner(){
+  const all=plannerPairs(),open=all.filter(x=>x.gap!==0);
+  const maxed=all.length-open.length,points=open.reduce((s,x)=>s+(x.gap||0),0);
+  // Crafter-tagged characters first, then pairs already started (closest to
+  // done first), then not-started ones
+  open.sort((a,b)=>((b.c.role==="Crafter")-(a.c.role==="Crafter"))||(b.started-a.started)||((a.gap??1e9)-(b.gap??1e9))||a.c.name.localeCompare(b.c.name));
+  const by={};all.forEach(x=>{const e=by[x.p]=by[x.p]||{n:0,maxed:0,gap:0};e.n++;if(x.gap===0)e.maxed++;else e.gap+=x.gap||0});
+  $("plansum").hidden=false;
+  $("plansum").innerHTML='<div class="psum">'+Object.keys(by).sort((a,b)=>by[b].gap-by[a].gap).map(n=>{const e=by[n];
+    return '<div class="pcard"><div class="pt">'+esc(n)+'</div><div class="pv2">'+(e.gap?"<b>"+e.gap.toLocaleString()+"</b> points to go":'<b class="good">All maxed</b>')+
+      '</div><div class="faint">'+e.maxed+" of "+e.n+" maxed</div></div>"}).join("")+"</div>";
+  $("pcount").textContent=maxed+" of "+all.length+" maxed in Midnight · "+points.toLocaleString()+" skill points to go";
+  $("matrix").innerHTML=open.length?"<thead><tr><th>Character</th><th>Role</th><th>Profession</th><th>Midnight skill</th><th class=num>Gap</th></tr></thead><tbody>"+
+    open.map(x=>{const pct=x.max?Math.min(100,x.skill/x.max*100):0;
+      return "<tr><td>"+nameHtml(x.c)+'<div class="realm">'+esc(x.c.realm)+"</div></td><td>"+roleChip(x.c.role)+"</td><td><b>"+esc(x.p)+"</b></td>"+
+        '<td><div class="lvl"><div class="bar"><i style="width:'+pct+'%"></i></div><span class="sk">'+x.skill+"<span>/"+(x.max||"?")+"</span></span></div></td>"+
+        '<td class="num">'+(x.gap==null?'<span class="faint">not started</span>':x.started?"<b>"+x.gap+"</b>":'<span class="dim">'+x.gap+" · not started</span>")+"</td></tr>"}).join("")+"</tbody>"
+    :'<tbody><tr><td class="empty good">Every profession on these characters is maxed for Midnight.</td></tr></tbody>';
+  $("phint").textContent="Crafter-tagged characters are listed first, then the closest to max. Uses your last sync — no extra Blizzard calls.";
+}
+
+/* ---------------- weekly checklist ---------------- */
+function resetText(ts){
+  const s=ts-Date.now()/1000,d=Math.floor(s/86400),h=Math.floor(s%86400/3600);
+  return (d?d+"d ":"")+h+"h · "+new Date(ts*1000).toLocaleString(undefined,{weekday:"short",hour:"numeric",minute:"2-digit"});
+}
+function cooldownCell(c){
+  if(!c.cooldowns||!c.cooldowns.length)return '<span class="faint" title="Update the addon to v2.1, then open your profession window in game after using a cooldown">—</span>';
+  const now=Date.now()/1000;
+  return c.cooldowns.map(cd=>{const used=cd.ready_at>now;
+    return '<span class="pill'+(used?" maxed":"")+'" title="'+esc(cd.profession)+'">'+(used?"✓ ":"")+esc(cd.name)+
+      ' <span class="exp">'+(used?"ready in "+resetText(cd.ready_at).split(" · ")[0]:"ready")+"</span></span>"}).join("");
+}
+function renderWeekly(){
+  document.querySelectorAll("#wscope button").forEach(b=>b.classList.toggle("on",b.dataset.wscope===ui.wscope));
+  const W=D.weekly,items=W.items;
+  const rows=D.characters.filter(c=>c.tracked&&(ui.wscope==="all"||c.level>=CAP))
+    .sort((a,b)=>b.level-a.level||a.name.localeCompare(b.name));
+  let done=0;
+  $("wtable").innerHTML=rows.length?"<thead><tr><th>Character</th>"+items.map(i=>'<th class="tc">'+esc(i.label)+"</th>").join("")+"<th>Profession cooldowns</th></tr></thead><tbody>"+
+    rows.map(c=>{const ck=W.checks[c.key]||{};
+      return "<tr><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+" · "+c.level+"</div></td>"+
+        items.map(i=>{if(ck[i.id])done++;return '<td class="tc"><input type="checkbox" class="wk" data-key="'+esc(c.key)+'" data-item="'+i.id+'"'+(ck[i.id]?" checked":"")+' aria-label="'+esc(i.label)+" — "+esc(c.name)+'"></td>'}).join("")+
+        "<td>"+cooldownCell(c)+"</td></tr>"}).join("")+"</tbody>"
+    :'<tbody><tr><td class="empty">No tracked characters'+(ui.wscope==="all"?"":" at "+CAP)+' yet — star (☆) characters on the Roster tab.</td></tr></tbody>';
+  $("wcount").textContent=done+" of "+rows.length*items.length+" done · resets in "+resetText(W.next_reset);
+}
+async function setWeekly(key,item,done){
+  try{await postJSON("/api/weekly",{key,item,done})}catch(e){alert("Couldn't save: "+e.message);load();return}
+  const ck=D.weekly.checks[key]=D.weekly.checks[key]||{};
+  if(done)ck[item]=true;else delete ck[item];
+  renderWeekly();
+}
+
 /* ---------------- events ---------------- */
 async function setRole(key,role){
   const r=await fetch("/api/role",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,role})});
@@ -1655,9 +1936,11 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update]");
   if(!el)return;
-  if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
+  if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
+  else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
+  else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
   else if(el.dataset.goal){goalAction(el.dataset.goal)}
   else if(el.dataset.tab){ui.tab=el.dataset.tab;render()}
   else if(el.dataset.sort){const k=el.dataset.sort;if(ui.sort===k){if(ui.dir===1)ui.dir=-1;else ui.sort=""}else{ui.sort=k;ui.dir=(k==="name"||k==="class")?1:-1}render()}
@@ -1674,7 +1957,8 @@ document.addEventListener("click",async e=>{
 document.addEventListener("change",e=>{
   const t=e.target;
   if(t.classList.contains("rolesel"))return setRole(t.dataset.key,t.value);
-  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole"};
+  if(t.classList.contains("wk"))return setWeekly(t.dataset.key,t.dataset.item,t.checked);
+  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec"};
   if(map[t.id]){ui[map[t.id]]=t.type==="checkbox"?t.checked:t.value;render()}
 });
 $("q").addEventListener("input",e=>{ui.q=e.target.value;render()});
@@ -1688,7 +1972,7 @@ $("syncbtn").addEventListener("click",async()=>{
 // wrote new data. This is what makes /fl sync show up without a refresh.
 let lastStamp=null;
 async function poll(){
-  try{const s=await (await fetch("/api/stamp")).json();const k=s.sv+"|"+s.cache+"|"+s.syncing;
+  try{const s=await (await fetch("/api/stamp")).json();const k=s.sv+"|"+s.cache+"|"+s.upd+"|"+s.syncing;
     if(lastStamp!==null&&k!==lastStamp)load();lastStamp=k}catch(e){}
   setTimeout(poll,3000);
 }
@@ -2047,6 +2331,14 @@ def build_api_data():
                 "gold_7d": gold_7d_change(g.get("history", [])),
             })
     for c in chars:
+        g = gold.get(c["key"], {})
+        c["cooldowns"] = g.get("cooldowns", [])
+        # rested XP as a % of the current level's XP bar (Blizzard caps the
+        # pool at 150%). It's the value when the addon last saw this
+        # character - it keeps growing while they rest, so show its date.
+        if g.get("rested") is not None and g.get("xp_max") and (c.get("level") or 0) < CAP:
+            c["rested"] = {"pct": min(150, round(g["rested"] * 100.0 / g["xp_max"])),
+                           "at": g.get("last_seen", 0)}
         c["role"] = roles.get(c["key"], "")
         c["tracked"] = c["key"] in tracked_keys
     # sort: tracked first, then level desc, then name
@@ -2084,6 +2376,8 @@ def build_api_data():
         "expansions": [{"short": s, "full": f} for s, f, _p in EXPANSIONS],
         "roles": ROLES,
         "version": APP_VERSION,
+        "update": update_available(),
+        "weekly": weekly_state(settings),
         "totals": {
             "tracked": len(tracked),
             "at_cap": at_cap,
@@ -2253,8 +2547,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # single-character sync, so it's a free "data changed" signal
             cache_mtime = (os.path.getmtime(CACHE_PATH)
                            if os.path.exists(CACHE_PATH) else 0)
+            # update_check.json changing means a new version may be out
+            upd_mtime = (os.path.getmtime(UPDATE_PATH)
+                         if os.path.exists(UPDATE_PATH) else 0)
             self.send_json({"sv": STATE["sv_mtime"], "cache": cache_mtime,
-                            "syncing": STATE["syncing"]})
+                            "upd": upd_mtime, "syncing": STATE["syncing"]})
             return
 
         if path == "/api/collections":
@@ -2437,6 +2734,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if parsed.path == "/api/weekly":
+            req = read_json_body(self, body)
+            item = (req or {}).get("item")
+            if not req or not req.get("key") or item not in dict(WEEKLY_ITEMS):
+                self.send_json({"error": "bad request"}, 400)
+                return
+            s = load_settings()
+            w = s.get("weekly") or {}
+            if w.get("week") != week_id():
+                w = {"week": week_id(), "checks": {}}  # new week: start clean
+            char = w["checks"].setdefault(str(req["key"]), {})
+            if req.get("done"):
+                char[item] = True
+            else:
+                char.pop(item, None)
+            s["weekly"] = w
+            save_settings(s)
+            self.send_json({"ok": True})
+            return
+
         if parsed.path == "/api/role":
             req = read_json_body(self, body)
             if not req or "key" not in req:
@@ -2506,6 +2823,9 @@ def main():
                   "Connect for new characters, mounts and pets.")
     threading.Thread(target=watch_addon_file, daemon=True).start()
     threading.Thread(target=auto_sync_loop, daemon=True).start()
+    # right away, not after auto_sync_loop's start-up pause, so a new
+    # version shows on the first launch
+    threading.Thread(target=check_for_update, daemon=True).start()
     print("Dashboard: %s" % url)
     print("Your data is saved in: %s" % BASE_DIR)
     print("Close this window (or press Ctrl+C) to stop the dashboard.")
