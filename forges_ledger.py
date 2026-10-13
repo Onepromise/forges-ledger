@@ -44,6 +44,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
+APP_VERSION = "0.1.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -1233,7 +1234,7 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 
 <div class="note">Gold comes from the ForgeGoldTracker addon save file on this PC (re-read on every page load).
 Levels, professions and recipes come from the Blizzard API when you sync. Roles are saved in forge_dashboard_roles.json next to the script.
-Blizzard data older than 30 days is deleted automatically. <a href="/privacy" target="_blank" style="color:inherit">Privacy policy</a>.<br>
+<span id="appver"></span>Blizzard data older than 30 days is deleted automatically. <a href="/privacy" target="_blank" style="color:inherit">Privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
 World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.</div>
 </div>
@@ -1267,6 +1268,7 @@ async function load(){
   try{d=await (await fetch("/api/data")).json()}catch(e){$("syncinfo").textContent="Can't reach the dashboard server — is forge_dashboard.py running?";return}
   if(d.error){$("alert").innerHTML='<div class="alert err">'+esc(d.error)+"</div>";return}
   const first=!D;if(D&&D.synced_at!==d.synced_at)COL=null;D=d;
+  $("appver").textContent="Forge's Ledger v"+D.version+" · ";
   if(first)fillStaticOptions();
   header();render();
   if(D.syncing)setTimeout(load,3000);
@@ -1990,6 +1992,7 @@ def build_api_data():
         "catalog_totals": catalog_totals,
         "expansions": [{"short": s, "full": f} for s, f, _p in EXPANSIONS],
         "roles": ROLES,
+        "version": APP_VERSION,
         "totals": {
             "tracked": len(tracked),
             "at_cap": at_cap,
@@ -2067,7 +2070,7 @@ def read_json_body(handler, body):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "ForgesLedger/1.0"
+    server_version = "ForgesLedger/" + APP_VERSION
 
     def log_message(self, *a):
         pass
@@ -2373,7 +2376,7 @@ def main():
     if sys.platform == "win32":
         os.system("title Forge's Ledger - close this window to stop")
     print("=" * 60)
-    print("Forge's Ledger")
+    print("Forge's Ledger v%s" % APP_VERSION)
     print("=" * 60)
     secure_existing_config()
     if sys.platform != "win32":
