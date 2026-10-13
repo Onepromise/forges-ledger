@@ -45,7 +45,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.1.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.2.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
