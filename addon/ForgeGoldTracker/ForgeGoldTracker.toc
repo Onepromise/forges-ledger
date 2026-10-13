@@ -1,0 +1,7 @@
+## Interface: 120000, 120100
+## Title: Forge Gold Tracker
+## Notes: Records each character's gold for Forge's Ledger on this PC. Click the Sync button, use the keybind, or type /fgt sync to update the dashboard immediately.
+## Author: Forge
+## Version: 1.3
+## SavedVariables: ForgeGoldDB
+ForgeGoldTracker.lua

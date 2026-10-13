@@ -1,0 +1,18 @@
+# Personal data - NEVER commit: encrypted Blizzard login, cached character
+# data, roles, tracked roster and gold goal. (The packaged .exe keeps these
+# in %LOCALAPPDATA%\ForgesLedger instead; these cover running from source.)
+forge_dashboard_*.json
+*.json.tmp
+
+# Private planning docs (premium/Patreon plans, compliance notes)
+PREMIUM_SPEC.md
+
+# Old pre-release version - contains personal character names
+forge_dashboard.backup-v1.py
+
+# Build output (rebuild with build_exe.bat)
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
