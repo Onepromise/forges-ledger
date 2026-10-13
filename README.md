@@ -18,10 +18,10 @@ tracking. See [PRIVACY.md](PRIVACY.md).
 - **Classes** — which classes you have, which are missing, and which have no
   max-level character yet.
 - **Collections** — mounts, battle pets, and achievement progress by category.
-- **Gold** — per-character and warband totals, 7-day change, and a gold goal
+- **Gold** — per-character gold, warband bank gold, totals, 7-day change, and a gold goal
   with an optional deadline, daily target, and projected finish date.
 - **Live updates** — the companion addon's Sync button, a keybind, or
-  `/fgt sync` updates the dashboard within seconds. It also refreshes from
+  `/fl sync` updates the dashboard within seconds. It also refreshes from
   Blizzard on startup and hourly.
 
 ## Getting started
@@ -40,15 +40,17 @@ and login are encrypted with your Windows account.
 
 ## Companion addon
 
-**Forge Gold Tracker** (in `addon/ForgeGoldTracker`) records each
-character's gold, which Blizzard's API doesn't provide. It's free and stays
+The **Forge's Ledger** addon (in `addon/ForgesLedger`) records each
+character's gold and your warband bank gold, which Blizzard's API doesn't
+provide. It's free and stays
 free — Blizzard's add-on policy requires that.
 
-- `/fgt` — warband gold total
-- `/fgt sync` or the on-screen **Sync** button — update the dashboard now
+- `/fl` — gold total (characters + warband bank)
+- `/fl sync` or the on-screen **Sync** button — update the dashboard now
   (reloads your UI; WoW only saves addon data on reload, logout, or exit)
-- `/fgt button` — show/hide the Sync button (shift-drag to move it)
-- Keybind: Options → Keybindings → AddOns → Forge Gold Tracker
+- `/fl button` — show/hide the Sync button (shift-drag to move it)
+- Keybind: Options → Keybindings → AddOns → Forge's Ledger
+- `/forgesledger` works too, if another addon also uses `/fl`
 
 ## Running from source
 
@@ -67,7 +69,7 @@ Double-click `build_exe.bat`. It creates its own build environment (in
 `%LOCALAPPDATA%\ForgesLedgerBuild`), installs PyInstaller there, and writes
 `dist\ForgesLedger.exe`.
 
-When the addon changes, update `addon/ForgeGoldTracker` and bump its
+When the addon changes, update `addon/ForgesLedger` and bump its
 `## Version` line so the app's Settings page offers the update.
 
 ## Blizzard

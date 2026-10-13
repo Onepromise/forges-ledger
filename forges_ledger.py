@@ -3,7 +3,7 @@
 Forge's Ledger - desktop companion app for World of Warcraft players.
 
 Pulls from BOTH sources into one local dashboard:
-  1. The ForgeGoldTracker addon save file  -> per-character gold + history
+  1. The Forge's Ledger addon save file    -> per-character gold + history
   2. The Blizzard API (your own client)    -> levels, professions per character
 
 Runs on your gaming PC. Your Client ID / Secret / tokens live only in
@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -73,6 +74,11 @@ else:
 CONFIG_PATH = os.path.join(BASE_DIR, "forge_dashboard_config.json")
 CACHE_PATH = os.path.join(BASE_DIR, "forge_dashboard_cache.json")
 ROLES_PATH = os.path.join(BASE_DIR, "forge_dashboard_roles.json")
+
+# The companion addon's folder name, which WoW also uses for its save file
+# (WTF/Account/<account>/SavedVariables/<folder>.lua).
+ADDON_FOLDER = "ForgesLedger"
+OLD_ADDON_FOLDER = "ForgeGoldTracker"  # name before the rename (addon v1.x)
 
 # Roles you can tag a character with on the dashboard (stored in ROLES_PATH).
 ROLES = ["Main", "Farmer", "Crafter", "Bank", "Leveling", "Alt"]
@@ -431,7 +437,12 @@ def find_sv_file():
         if not os.path.isdir(sv_dir):
             continue
         for account in os.listdir(sv_dir):
-            p = os.path.join(sv_dir, account, "SavedVariables", "ForgeGoldTracker.lua")
+            # current addon name first; the pre-rename file only if the new
+            # one doesn't exist yet (not migrated)
+            sv = os.path.join(sv_dir, account, "SavedVariables")
+            p = os.path.join(sv, ADDON_FOLDER + ".lua")
+            if not os.path.isfile(p):
+                p = os.path.join(sv, OLD_ADDON_FOLDER + ".lua")
             if os.path.isfile(p):
                 mt = os.path.getmtime(p)
                 if mt > best_mtime:
@@ -440,11 +451,23 @@ def find_sv_file():
     return best
 
 
+def _history(raw):
+    out = [{"day": h["day"], "money": h.get("money", 0)}
+           for h in (raw or []) if isinstance(h, dict) and "day" in h]
+    return sorted(out, key=lambda h: h["day"])
+
+
 def load_gold():
-    """Return {normkey: {name, realm, money, level, class, faction, history}}."""
+    """Read the addon's save file.
+
+    Returns (chars, path, warband):
+      chars   = {normkey: {name, realm, money, level, class, faction, history}}
+      warband = {money, updated, history} for the account's warband bank, or
+                None if the addon hasn't recorded it yet (v1.4+, after a bank
+                has been opened or its balance has changed)."""
     path = find_sv_file()
     if not path:
-        return {}, None
+        return {}, None, None
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         db = parse_savedvariables(f.read())
     out = {}
@@ -455,10 +478,6 @@ def load_gold():
         # key looks like "Name-Realm"; realm part may itself contain dashes,
         # so split only on the FIRST dash... names can't contain dashes.
         realm = str(key).split("-", 1)[1] if "-" in str(key) else ""
-        hist = []
-        for h in (c.get("history") or []):
-            if isinstance(h, dict) and "day" in h:
-                hist.append({"day": h["day"], "money": h.get("money", 0)})
         out[norm(name) + "@" + norm(realm)] = {
             "name": name,
             "realm": realm,
@@ -466,9 +485,14 @@ def load_gold():
             "level": c.get("level", 0) or 0,
             "class": c.get("class", ""),
             "faction": c.get("faction", ""),
-            "history": sorted(hist, key=lambda h: h["day"]),
+            "history": _history(c.get("history")),
         }
-    return out, path
+    w = db.get("warband")
+    warband = None
+    if isinstance(w, dict) and isinstance(w.get("money"), (int, float)):
+        warband = {"money": w["money"], "updated": w.get("updated", 0),
+                   "history": _history(w.get("history"))}
+    return out, path, warband
 
 
 def gold_7d_change(hist):
@@ -1009,7 +1033,7 @@ def auto_sync_loop():
 
 
 def watch_addon_file():
-    """Notice the moment WoW writes the addon's save file (/fgt sync,
+    """Notice the moment WoW writes the addon's save file (/fl sync,
     /reload, logout) and refresh that character. Polling every 2s is
     simpler than OS file-watch APIs and costs nothing measurable."""
     last = None
@@ -1232,7 +1256,7 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
   <div id="cbody"></div>
 </section>
 
-<div class="note">Gold comes from the ForgeGoldTracker addon save file on this PC (re-read on every page load).
+<div class="note">Gold comes from the Forge's Ledger addon save file on this PC (re-read on every page load).
 Levels, professions and recipes come from the Blizzard API when you sync. Roles are saved in forge_dashboard_roles.json next to the script.
 <span id="appver"></span>Blizzard data older than 30 days is deleted automatically. <a href="/privacy" target="_blank" style="color:inherit">Privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
@@ -1303,7 +1327,12 @@ function header(){
   renderGoal();
   $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
       :stat("—","tracked characters — click ☆ next to a name to track it")+stat("—","levels to go"))+
-    stat('<span class="goldv">'+esc(t.gold_fmt)+"</span>","warband gold")+stat('<span class="goldv">'+esc(t.gold_7d_fmt)+"</span>","gold change, last 7 days");
+    stat('<span class="goldv">'+esc(t.gold_fmt)+"</span>",bankLine(t))+stat('<span class="goldv">'+esc(t.gold_7d_fmt)+"</span>","gold change, last 7 days");
+}
+function bankLine(t){
+  const b=D.warband_bank;
+  if(!b)return 'total gold<br><span class="faint">warband bank: open a bank in game to record it</span>';
+  return 'total gold<br><span class="faint">'+esc(t.characters_gold_fmt)+" on characters · "+esc(b.fmt)+" in warband bank</span>";
 }
 function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div class="l">'+l+"</div></div>"}
 
@@ -1604,7 +1633,7 @@ function renderGoal(){
     '<div class="gv"><span class="goldv">'+gold(cur)+"</span> <span>of "+gold(g.amount)+" · "+g.pct.toFixed(g.pct<10?1:0)+"%</span></div></div>"+
     '<button class="btn" data-goal="edit">Edit</button></div>'+
     '<div class="bar"><i style="width:'+Math.min(100,g.pct)+'%"></i></div><div class="gd">'+bits.map(b=>"<span>"+b+"</span>").join("")+"</div>"+
-    '<div class="hint">Counts gold on characters the addon has recorded. Log into an alt once to include it.</div></div>';
+    '<div class="hint">Counts gold on characters the addon has recorded, plus your warband bank. Log into an alt once to include it.</div></div>';
 }
 async function goalAction(a){
   if(a==="edit"){editingGoal=true;renderGoal()}
@@ -1654,7 +1683,7 @@ $("syncbtn").addEventListener("click",async()=>{
   setTimeout(load,500);
 });
 // Poll a tiny endpoint; reload full data only when the game saved or a sync
-// wrote new data. This is what makes /fgt sync show up without a refresh.
+// wrote new data. This is what makes /fl sync show up without a refresh.
 let lastStamp=null;
 async function poll(){
   try{const s=await (await fetch("/api/stamp")).json();const k=s.sv+"|"+s.cache+"|"+s.syncing;
@@ -1811,6 +1840,12 @@ def render_setup(error=None, notice=None, form=None):
         addon_html = ('<div class="status warn">Enter your WoW folder in step 4, '
                       'then install.</div><div class="row">'
                       + install_btn % "Install addon" + '</div>')
+    elif not st["installed"] and st["old_installed"]:
+        addon_html = ('<div class="status warn">The older "Forge Gold Tracker" addon is '
+                      'installed - update to the renamed Forge\'s Ledger addon. Your gold '
+                      'history comes with it. <b>Close World of Warcraft first.</b></div>'
+                      '<div class="row">' + install_btn % "Update addon" + '</div>'
+                      '<div class="hint">In game, the command is now /fl instead of /fgt.</div>')
     elif not st["installed"]:
         addon_html = ('<div class="status warn">Not installed.</div><div class="row">'
                       + install_btn % "Install addon" + '</div>'
@@ -1873,12 +1908,13 @@ def detect_wow_path():
     return None
 
 
-ADDON_BUNDLE = os.path.join(RESOURCE_DIR, "addon", "ForgeGoldTracker")
+ADDON_BUNDLE = os.path.join(RESOURCE_DIR, "addon", ADDON_FOLDER)
 
 
-def _toc_version(folder):
+def _toc_version(folder, name=None):
     try:
-        with open(os.path.join(folder, "ForgeGoldTracker.toc"), encoding="utf-8") as f:
+        with open(os.path.join(folder, (name or ADDON_FOLDER) + ".toc"),
+                  encoding="utf-8") as f:
             for line in f:
                 if line.startswith("## Version:"):
                     return line.split(":", 1)[1].strip()
@@ -1888,19 +1924,64 @@ def _toc_version(folder):
 
 
 def addon_status(wow_path):
-    dest = (os.path.join(wow_path, "_retail_", "Interface", "AddOns", "ForgeGoldTracker")
-            if wow_path else None)
+    addons = (os.path.join(wow_path, "_retail_", "Interface", "AddOns")
+              if wow_path else None)
+    dest = os.path.join(addons, ADDON_FOLDER) if addons else None
+    old = os.path.join(addons, OLD_ADDON_FOLDER) if addons else None
     return {"installed": _toc_version(dest) if dest else None,
-            "bundled": _toc_version(ADDON_BUNDLE), "dest": dest}
+            # the pre-rename "Forge Gold Tracker" addon, if still installed
+            "old_installed": _toc_version(old, OLD_ADDON_FOLDER) if old else None,
+            "bundled": _toc_version(ADDON_BUNDLE), "dest": dest, "old": old}
+
+
+def wow_running():
+    """True if retail WoW is open (tasklist ships with every Windows)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Wow.exe", "/NH"],
+                             capture_output=True, text=True, timeout=15,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "wow.exe" in out.lower()
 
 
 def install_addon(wow_path):
-    """Copy the bundled addon into WoW's AddOns folder (overwrites old files)."""
-    dest = addon_status(wow_path)["dest"]
+    """Copy the bundled addon into WoW's AddOns folder (overwrites old files).
+
+    Also upgrades from the pre-rename "Forge Gold Tracker" addon: WoW names
+    an addon's save file after its folder, so the old gold history lives in
+    ForgeGoldTracker.lua and the renamed addon would start empty. We copy it
+    to the new name (keeping the original as a backup) and remove the old
+    addon folder so the two don't run side by side. This must happen with
+    WoW closed - otherwise WoW writes its latest data to the OLD file on
+    exit, after our copy."""
+    st = addon_status(wow_path)
     if not os.path.isdir(ADDON_BUNDLE):
         raise RuntimeError("The addon files are missing from the app folder "
-                           "(expected addon\\ForgeGoldTracker).")
-    shutil.copytree(ADDON_BUNDLE, dest, dirs_exist_ok=True)
+                           "(expected addon\\%s)." % ADDON_FOLDER)
+    accounts = os.path.join(wow_path, "_retail_", "WTF", "Account")
+    to_migrate = []
+    if os.path.isdir(accounts):
+        for a in os.listdir(accounts):
+            sv = os.path.join(accounts, a, "SavedVariables")
+            old_f = os.path.join(sv, OLD_ADDON_FOLDER + ".lua")
+            new_f = os.path.join(sv, ADDON_FOLDER + ".lua")
+            if os.path.isfile(old_f) and not os.path.exists(new_f):
+                to_migrate.append((old_f, new_f))
+    if (to_migrate or st["old_installed"]) and wow_running():
+        raise RuntimeError("Close World of Warcraft completely first - this "
+                           "update moves your saved gold history to the "
+                           "addon's new name, which can't be done while the "
+                           "game is open.")
+    shutil.copytree(ADDON_BUNDLE, st["dest"], dirs_exist_ok=True)
+    for old_f, new_f in to_migrate:
+        shutil.copy2(old_f, new_f)
+        print("Migrated addon data: %s -> %s" % (old_f, new_f), flush=True)
+    if st["old_installed"] and os.path.isdir(st["old"]):
+        shutil.rmtree(st["old"])
+        print("Removed the old Forge Gold Tracker addon folder.", flush=True)
 
 
 def check_credentials(client_id, client_secret):
@@ -1923,11 +2004,11 @@ def build_api_data():
     cache = load_cache()
     addon_error = None
     try:
-        gold, sv_path = load_gold()
+        gold, sv_path, warband = load_gold()
     except Exception as e:
         # a save file we can't read shouldn't take the whole dashboard down -
         # show the Blizzard data and say what went wrong instead
-        gold, sv_path = {}, find_sv_file()
+        gold, sv_path, warband = {}, find_sv_file(), None
         addon_error = "Couldn't read the addon save file (%s)." % e
     roles = load_roles()
     settings = load_settings()
@@ -1972,8 +2053,16 @@ def build_api_data():
     tracked = [c for c in chars if c["tracked"]]
     at_cap = sum(1 for c in tracked if (c.get("level") or 0) >= CAP)
     levels_remaining = sum(max(0, CAP - (c.get("level") or 0)) for c in tracked)
-    gold_total = sum(c.get("gold", 0) for c in chars)
-    gold_7d = sum(c.get("gold_7d", 0) for c in chars)
+    chars_total = sum(c.get("gold", 0) for c in chars)
+    bank = warband["money"] if warband else 0
+    bank_7d = gold_7d_change(warband["history"]) if warband else 0
+    gold_total = chars_total + bank
+    gold_7d = sum(c.get("gold_7d", 0) for c in chars) + bank_7d
+    # the goal's pace counts the bank like one more "character", so moving
+    # gold between characters and the bank isn't mistaken for earning it
+    goal_series = dict(gold)
+    if warband:
+        goal_series["__warband_bank__"] = warband
 
     # only send recipe COUNTS per tier; full names come from /api/catalog/<id>
     # on demand, which keeps this payload small
@@ -1998,10 +2087,14 @@ def build_api_data():
             "at_cap": at_cap,
             "levels_remaining": levels_remaining,
             "gold_fmt": fmt_gold(gold_total),
+            "characters_gold_fmt": fmt_gold(chars_total),
             "gold_7d_fmt": ("+" if gold_7d > 0 else "-") + fmt_gold(abs(gold_7d))
             if gold_7d != 0 else "—",
         },
-        "gold_goal": gold_goal_status(settings["gold_goal"], gold, gold_total),
+        "gold_goal": gold_goal_status(settings["gold_goal"], goal_series, gold_total),
+        "warband_bank": ({"money": bank, "fmt": fmt_gold(bank),
+                          "updated": warband["updated"], "gold_7d": bank_7d}
+                         if warband else None),
     }
 
 

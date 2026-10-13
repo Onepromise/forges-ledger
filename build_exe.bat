@@ -6,7 +6,7 @@ rem (outside OneDrive) so PyInstaller never touches your main Python install.
 rem Safe to re-run any time; the first run downloads PyInstaller.
 rem
 rem Before building after an addon change: copy the addon into
-rem addon\ForgeGoldTracker and bump its "## Version" line.
+rem addon\ForgesLedger and bump its "## Version" line.
 
 setlocal
 cd /d "%~dp0"

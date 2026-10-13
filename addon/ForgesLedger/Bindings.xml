@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="FORGESLEDGER_SYNC" header="FORGESLEDGER" category="ADDONS">
+		ForgesLedger_Sync()
+	</Binding>
+</Bindings>

@@ -33,7 +33,8 @@ replaced each time you sync, and **automatically deleted once it is more than
 
 ### 2. Companion Addon Data
 - Gold held per character (with a daily history), plus each character's
-  level, class and faction, recorded by the free Forge Gold Tracker in-game addon.
+  level, class and faction, and your account's warband bank gold (with a
+  daily history), recorded by the free Forge's Ledger in-game addon.
 - Read from the addon's local SavedVariables file on your computer.
 - Never leaves your computer.
 
@@ -93,7 +94,8 @@ computer.
   (paste that into File Explorer's address bar to open it). To delete
   everything the app stores, delete that folder, and remove the addon's
   SavedVariables file
-  (`WTF\Account\<account>\SavedVariables\ForgeGoldTracker.lua`). There is
+  (`WTF\Account\<account>\SavedVariables\ForgesLedger.lua`, and
+  `ForgeGoldTracker.lua` if you used the addon before it was renamed). There is
   nothing stored anywhere else.
 
 ## Children's Privacy

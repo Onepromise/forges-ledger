@@ -1,5 +1,0 @@
-<Bindings>
-	<Binding name="FORGEGOLD_SYNC" header="FORGEGOLD" category="ADDONS">
-		ForgeGoldTracker_Sync()
-	</Binding>
-</Bindings>

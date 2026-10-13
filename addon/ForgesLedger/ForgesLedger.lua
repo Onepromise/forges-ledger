@@ -1,6 +1,6 @@
--- ForgeGoldTracker v1.3
+-- Forge's Ledger addon v2.0 (formerly Forge Gold Tracker)
 -- Records each character's gold (plus class/level/faction and a daily
--- history) into SavedVariables for Forge's Ledger running on this PC.
+-- history), and the account's warband bank gold, into SavedVariables for Forge's Ledger running on this PC.
 --
 -- WoW only writes SavedVariables to disk on logout, /reload, or game exit -
 -- addons can't write files or use the network while you play, and a reload
@@ -8,23 +8,26 @@
 -- on a timer. Ways to sync:
 --   * automatic: logging out, switching characters, exiting the game
 --   * the on-screen Sync button (turns gold after 5 min with new data)
---   * a keybind (Options > Keybindings > AddOns > Forge Gold Tracker)
---   * /fgt sync
+--   * a keybind (Options > Keybindings > AddOns > Forge's Ledger)
+--   * /fl sync
 -- The dashboard notices the file change within a couple of seconds.
 --
 -- Nothing is sent anywhere. All data stays on your PC.
 
-local ADDON_NAME = "ForgeGoldTracker"
-local VERSION = "1.3"
+local ADDON_NAME = "ForgesLedger"
+local VERSION = "2.0"
+-- The saved-data table keeps its original name on purpose: renaming it
+-- would orphan everyone's recorded gold history. (The app copies the old
+-- ForgeGoldTracker save file to this addon's new file name on install.)
 ForgeGoldDB = ForgeGoldDB or {}
 
 local MAX_HISTORY_DAYS = 120
 local NUDGE_AFTER = 5 * 60  -- seconds since last save before the button nudges
-local PREFIX = "|cffFFD700[ForgeGold]|r "
+local PREFIX = "|cffFFD700[Forge's Ledger]|r "
 
 -- labels for the Keybindings screen (Bindings.xml refers to these names)
-BINDING_HEADER_FORGEGOLD = "Forge Gold Tracker"
-BINDING_NAME_FORGEGOLD_SYNC = "Sync to dashboard (reloads UI)"
+BINDING_HEADER_FORGESLEDGER = "Forge's Ledger"
+BINDING_NAME_FORGESLEDGER_SYNC = "Sync to the app (reloads UI)"
 
 local dirty = false  -- gold/level changed since the file was last written
 local syncButton
@@ -35,6 +38,19 @@ local function CharKey()
     -- realms can contain spaces/apostrophes; normalize for a stable key
     realm = realm:gsub("[%s%'%-]", "")
     return (name or "Unknown") .. "-" .. realm
+end
+
+-- one history point per day (updates in place if already recorded today)
+local function RecordDay(history, money, today)
+    local last = history[#history]
+    if last and last.day == today then
+        last.money = money
+    else
+        tinsert(history, { day = today, money = money })
+        while #history > MAX_HISTORY_DAYS do
+            tremove(history, 1)
+        end
+    end
 end
 
 local function Snapshot()
@@ -57,17 +73,8 @@ local function Snapshot()
     c.name    = UnitName("player") or key
     c.lastSeen = now
 
-    -- one history point per day (updates in place if already recorded today)
     c.history = c.history or {}
-    local last = c.history[#c.history]
-    if last and last.day == today then
-        last.money = money
-    else
-        tinsert(c.history, { day = today, money = money })
-        while #c.history > MAX_HISTORY_DAYS do
-            tremove(c.history, 1)
-        end
-    end
+    RecordDay(c.history, money, today)
 
     ForgeGoldDB.chars[key] = c
     -- tells the dashboard which character changed, so it can refresh just
@@ -77,13 +84,48 @@ local function Snapshot()
     ForgeGoldDB.version = VERSION
 end
 
+-- Warband bank gold is shared by the whole account, so it's stored once in
+-- ForgeGoldDB.warband rather than per character.
+--
+-- The game may not have the warband bank's balance loaded right after login
+-- and can report 0 until it does. So a 0 is only trusted once a bank has
+-- been opened this session; otherwise we keep the last known balance rather
+-- than overwrite real gold with a 0 (the same failure as the old logout bug).
+local bankOpened = false
+
+local function WarbandMoney()
+    if not (C_Bank and C_Bank.FetchDepositedMoney and Enum and Enum.BankType
+            and Enum.BankType.Account) then
+        return nil  -- client without a warband bank
+    end
+    local ok, amount = pcall(C_Bank.FetchDepositedMoney, Enum.BankType.Account)
+    if not ok or type(amount) ~= "number" then return nil end
+    -- Midnight's "secret values" can't be compared or stored by addons
+    if issecretvalue and issecretvalue(amount) then return nil end
+    return amount
+end
+
+local function SnapshotWarband()
+    local amount = WarbandMoney()
+    if amount == nil or (amount == 0 and not bankOpened) then return end
+    local now = time()
+    local w = ForgeGoldDB.warband or {}
+    if w.money ~= amount then dirty = true end
+    w.money = amount
+    w.updated = now
+    w.history = w.history or {}
+    RecordDay(w.history, amount, date("%Y-%m-%d", now))
+    ForgeGoldDB.warband = w
+end
+
 -- Global so the keybinding in Bindings.xml can call it.
-function ForgeGoldTracker_Sync()
+function ForgesLedger_Sync()
     if InCombatLockdown() then
         print(PREFIX .. "Can't sync in combat - try again after the fight.")
         return
     end
     Snapshot()
+    SnapshotWarband()
     -- the reload wipes chat, so leave a note and confirm after it
     ForgeGoldDB.syncPending = true
     ReloadUI()
@@ -112,7 +154,7 @@ local function UpdateButton()
 end
 
 local function CreateSyncButton()
-    local b = CreateFrame("Button", "ForgeGoldSyncButton", UIParent, "UIPanelButtonTemplate")
+    local b = CreateFrame("Button", "ForgesLedgerSyncButton", UIParent, "UIPanelButtonTemplate")
     b:SetSize(86, 22)
     local p = ForgeGoldDB.buttonPos
     if p then
@@ -134,14 +176,14 @@ local function CreateSyncButton()
     b:SetScript("OnClick", function()
         -- releasing a shift-drag also counts as a click; don't reload on it
         if IsShiftKeyDown() then return end
-        ForgeGoldTracker_Sync()
+        ForgesLedger_Sync()
     end)
     b:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:AddLine("Forge Gold Tracker")
+        GameTooltip:AddLine("Forge's Ledger")
         GameTooltip:AddLine(SavedText(), 1, 1, 1)
-        GameTooltip:AddLine("Click to update the dashboard now (reloads your UI).", 0.8, 0.8, 0.8, true)
-        GameTooltip:AddLine("Shift-drag to move. /fgt button to hide.", 0.6, 0.6, 0.6, true)
+        GameTooltip:AddLine("Click to update the app now (reloads your UI).", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Shift-drag to move. /fl button to hide.", 0.6, 0.6, 0.6, true)
         GameTooltip:Show()
     end)
     b:SetScript("OnLeave", GameTooltip_Hide)
@@ -157,6 +199,9 @@ frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_MONEY")
 frame:RegisterEvent("PLAYER_LEVEL_UP")
 frame:RegisterEvent("PLAYER_LOGOUT")
+frame:RegisterEvent("BANKFRAME_OPENED")
+-- warband bank balance changed; pcall in case a client doesn't have it
+pcall(frame.RegisterEvent, frame, "ACCOUNT_MONEY")
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
@@ -165,11 +210,11 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_LOGIN" then
         CreateSyncButton()
         -- slight delay so everything is initialized
-        C_Timer.After(2, function() Snapshot(); UpdateButton() end)
+        C_Timer.After(2, function() Snapshot(); SnapshotWarband(); UpdateButton() end)
         if ForgeGoldDB.syncPending then
             ForgeGoldDB.syncPending = nil
             C_Timer.After(3, function()
-                print(PREFIX .. "Synced - the dashboard is updating now.")
+                print(PREFIX .. "Synced - the app is updating now.")
             end)
         end
     elseif event == "PLAYER_LEVEL_UP" then
@@ -178,6 +223,13 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_MONEY" then
         Snapshot()
         UpdateButton()
+    elseif event == "ACCOUNT_MONEY" then
+        SnapshotWarband()
+        UpdateButton()
+    elseif event == "BANKFRAME_OPENED" then
+        -- the bank's data is definitely loaded now, so even a 0 is real
+        bankOpened = true
+        C_Timer.After(0.5, function() SnapshotWarband(); UpdateButton() end)
     elseif event == "PLAYER_LOGOUT" then
         -- fires on logout AND reload, just before WoW writes the file.
         -- Only stamp the time: don't Snapshot here, because character data
@@ -187,7 +239,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     end
 end)
 
-local function WarbandTotal()
+local function CharactersTotal()
     local total, n = 0, 0
     for _, c in pairs(ForgeGoldDB.chars or {}) do
         total = total + (c.money or 0)
@@ -196,28 +248,36 @@ local function WarbandTotal()
     return total, n
 end
 
--- /fgt        : warband gold total across all recorded characters
--- /fgt sync   : save now and reload so the dashboard updates immediately
--- /fgt button : show/hide the on-screen Sync button
--- /fgt help   : list commands
-SLASH_FORGEGOLD1 = "/fgt"
-SlashCmdList["FORGEGOLD"] = function(msg)
+-- /fl        : gold total across recorded characters + warband bank
+-- /fl sync   : save now and reload so the app updates immediately
+-- /fl button : show/hide the on-screen Sync button
+-- /fl help   : list commands
+-- /forgesledger works too, in case another addon also claims /fl
+SLASH_FORGESLEDGER1 = "/fl"
+SLASH_FORGESLEDGER2 = "/forgesledger"
+SlashCmdList["FORGESLEDGER"] = function(msg)
     local cmd = strtrim((msg or ""):lower())
     if cmd == "sync" then
-        ForgeGoldTracker_Sync()
+        ForgesLedger_Sync()
     elseif cmd == "button" then
         ForgeGoldDB.hideButton = not ForgeGoldDB.hideButton
         if syncButton then syncButton:SetShown(not ForgeGoldDB.hideButton) end
         print(PREFIX .. "Sync button " .. (ForgeGoldDB.hideButton and "hidden." or "shown."))
     elseif cmd == "help" then
         print(PREFIX .. "v" .. VERSION .. " commands:")
-        print("  /fgt - warband gold total")
-        print("  /fgt sync - update the dashboard now (reloads UI)")
-        print("  /fgt button - show/hide the Sync button (shift-drag to move it)")
+        print("  /fl - gold total (characters + warband bank)")
+        print("  /fl sync - update the app now (reloads UI)")
+        print("  /fl button - show/hide the Sync button (shift-drag to move it)")
         print("  " .. SavedText())
     else
-        local total, n = WarbandTotal()
-        print(string.format("%s%d character(s) recorded. Warband total: %s",
-            PREFIX, n, GetMoneyString(total)))
+        local total, n = CharactersTotal()
+        local bank = ForgeGoldDB.warband and ForgeGoldDB.warband.money
+        print(string.format("%s%d character(s): %s", PREFIX, n, GetMoneyString(total)))
+        if bank then
+            print(string.format("%sWarband bank: %s  |  Total: %s", PREFIX,
+                GetMoneyString(bank), GetMoneyString(total + bank)))
+        else
+            print(PREFIX .. "Warband bank: not recorded yet - open a bank once.")
+        end
     end
 end
