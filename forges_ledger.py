@@ -45,7 +45,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.2.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.2.1"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -1063,6 +1063,7 @@ def watch_addon_file():
 PAGE = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Forge's Ledger</title>
+<link rel="icon" href="/favicon.ico">
 <style>
 :root{--bg:#0e1015;--panel:#161920;--panel2:#1b1f27;--hover:#1e232c;--line:#252a35;--txt:#e6e8ee;--dim:#8b93a5;--faint:#596173;
 --gold:#f5c542;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--accent:#7c93ff}
@@ -1698,7 +1699,7 @@ render();load();poll();
 
 # raw string so the page's backslashes (Windows paths) survive as written
 SETUP_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Setup - Forge's Ledger</title><style>
+<title>Setup - Forge's Ledger</title><link rel="icon" href="/favicon.ico"><style>
 :root{--bg:#0e1015;--panel:#161920;--panel2:#1b1f27;--line:#252a35;--txt:#e6e8ee;--dim:#8b93a5;--faint:#596173;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--accent:#7c93ff}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--txt);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
@@ -2203,6 +2204,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/setup":
             self.send_html(render_setup())
+            return
+
+        if path == "/favicon.ico":
+            # the same anvil icon that's baked into the .exe; shipped inside
+            # the .exe too, so it's read from the resource folder
+            try:
+                with open(os.path.join(RESOURCE_DIR, "forges-ledger.ico"), "rb") as f:
+                    icon = f.read()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/x-icon")
+            self.send_header("Content-Length", str(len(icon)))
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(icon)
             return
 
         if path == "/privacy":

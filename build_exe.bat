@@ -21,12 +21,16 @@ if not exist "%VENV%\Scripts\python.exe" (
 
 rem --onefile   : a single .exe to hand out
 rem --console   : keeps the status window; closing it stops the dashboard
-rem --add-data  : files the app reads at runtime (absolute paths, because
-rem               PyInstaller resolves relative ones from --specpath)
+rem --icon      : the anvil icon shown in Explorer, the taskbar and shortcuts
+rem --add-data  : files the app reads at runtime
+rem (absolute paths throughout, because PyInstaller resolves relative ones
+rem from --specpath, not from this folder)
 "%VENV%\Scripts\pyinstaller.exe" --noconfirm --clean --onefile --console ^
     --name ForgesLedger ^
+    --icon "%~dp0forges-ledger.ico" ^
     --add-data "%~dp0addon;addon" ^
     --add-data "%~dp0PRIVACY.md;." ^
+    --add-data "%~dp0forges-ledger.ico;." ^
     --workpath "%BUILD%\work" --specpath "%BUILD%" --distpath "%~dp0dist" ^
     "%~dp0forges_ledger.py" || goto :fail
 
