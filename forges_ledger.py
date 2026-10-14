@@ -46,7 +46,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.5.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.6.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -93,7 +93,8 @@ SATELLITES = {
         "db": "ForgesLedgerProfessionsDB",
         "schema": 1,
         "title": "Forge's Ledger: Professions",
-        "pitch": "profession leveling guides and shopping lists",
+        # describe what it does TODAY; update as guides/shopping lists land
+        "pitch": "your skill in every expansion at a glance, beside the profession window, and live skill numbers here",
         "games": ["retail"],  # Retail first; Forever later
     },
 }
@@ -741,6 +742,35 @@ def load_satellites(client=None, game="retail"):
                 print("Skipping unreadable %s: %s" % (path, e), flush=True)
         out[sid] = entry
     return out
+
+
+def apply_live_professions(c, api_synced_at):
+    """Where the Professions satellite read a skill in game MORE RECENTLY than
+    Blizzard's last sync, show the game's number (marked live). Tiers learned
+    since the sync are added. Older satellite readings never override."""
+    data = (c.get("sat") or {}).get("professions") or {}
+    tiers, scanned = data.get("tiers"), data.get("lastScan", 0)
+    if not isinstance(tiers, dict) or not isinstance(scanned, (int, float)) or scanned <= api_synced_at:
+        return
+    profs = {p["name"]: p for p in c.get("professions", [])}
+    for tier_name, t in tiers.items():
+        if not isinstance(t, dict) or not isinstance(t.get("skill"), (int, float)):
+            continue
+        prof = profs.get(str(t.get("profession") or ""))
+        if prof is None:
+            prof = {"name": str(t.get("profession") or ""), "id": None, "tiers": []}
+            if not prof["name"]:
+                continue
+            c.setdefault("professions", []).append(prof)
+            profs[prof["name"]] = prof
+        tier = next((x for x in prof["tiers"] if x.get("name") == tier_name), None)
+        if tier is None:
+            order, exp = expansion_of(tier_name)
+            tier = {"id": None, "name": tier_name, "recipes": [], "order": order, "exp": exp}
+            prof["tiers"].append(tier)
+            prof["tiers"].sort(key=lambda x: x.get("order", 99))
+        tier["skill"], tier["max"] = int(t["skill"]), int(t.get("maxSkill") or tier.get("max") or 0)
+        tier["live"] = int(scanned)
 
 
 def satellites_summary(sats):
@@ -2113,7 +2143,8 @@ function expTitle(s){const e=D.expansions.find(x=>x.short===s);return e?e.full:s
 function tierCell(t,extra,attrs){
   if(!t||(!t.skill&&!t.max))return '<td class="tc"><span class="faint">·</span></td>';
   const pct=t.max?Math.min(100,t.skill/t.max*100):0;
-  return '<td class="tc has'+(isMaxed(t)?" maxed":"")+(extra||"")+'"'+(attrs||"")+'><div class="sk">'+t.skill+"<span>/"+t.max+'</span></div><div class="mini"><i style="width:'+pct+'%"></i></div>'+recCount(t)+"</td>";
+  const live=t.live?' title="Read in game '+ago(t.live)+' by Forge&#39;s Ledger: Professions - newer than Blizzard&#39;s last sync"':"";
+  return '<td class="tc has'+(isMaxed(t)?" maxed":"")+(extra||"")+'"'+(attrs||"")+live+'><div class="sk">'+t.skill+"<span>/"+t.max+'</span>'+(t.live?' <span class="good" style="font-size:10px">●</span>':"")+'</div><div class="mini"><i style="width:'+pct+'%"></i></div>'+recCount(t)+"</td>";
 }
 function recCount(t){
   const tot=t.id!=null?D.catalog_totals[String(t.id)]:null;
@@ -2128,7 +2159,7 @@ function satelliteCard(id){
   if(!s||!s.bundled)return "";
   let dismissed=false;try{dismissed=localStorage.getItem("satDismiss_"+id)==="1"}catch(e){}
   if(!s.installed)return dismissed?"":'<div class="alert info">Install <b>'+esc(s.title)+'</b> for '+esc(s.pitch)+
-    ' — <a href="/setup" style="color:inherit">Settings → Update addon</a> · <a href="#" data-sat-dismiss="'+esc(id)+'" style="color:inherit">Hide</a></div>';
+    ' — <a href="/setup" style="color:inherit">Settings → Companion addon</a> · <a href="#" data-sat-dismiss="'+esc(id)+'" style="color:inherit">Hide</a></div>';
   if(!s.characters)return '<div class="alert info">'+esc(s.title)+' is installed. Log into a character with it enabled to see its data here.</div>';
   return "";
 }
@@ -2773,6 +2804,17 @@ async function importSettings(input){
   }catch(err){st.textContent=err.message}
 }
 document.addEventListener("click",async e=>{
+  const sb=e.target.closest("[data-install-sat]");
+  if(sb){
+    sb.disabled=true;sb.textContent="Installing…";
+    try{
+      const r=await fetch("/setup/addon",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({wow_path:document.querySelector("[name=wow_path]").value,satellite:sb.dataset.installSat})});
+      const j=await r.json();if(!r.ok)throw new Error(j.error||"Install failed");
+      sb.outerHTML='<span class="ok">&#10003; installed (version '+j.version+'). Type /reload in game.</span>';
+    }catch(err){sb.disabled=false;sb.textContent="Try again";alert(err.message)}
+    return;
+  }
   if(e.target.id!=="open-folder")return;
   try{await fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})}catch(err){}
 });
@@ -2843,6 +2885,18 @@ def render_setup(error=None, notice=None, form=None):
     else:
         addon_html = ('<div class="status ok">&#10003; Installed (version %s).</div>'
                       % esc(st["installed"]))
+    # optional companion addons (satellites) - each with its own button
+    for sat in satellite_status(wow) if wow_ok else []:
+        btn = ('<button class="btn" type="button" data-install-sat="%s">%%s</button>' % esc(sat["id"]))
+        if not sat["installed"]:
+            state = '<span class="dim">optional - not installed</span> ' + btn % "Install"
+        elif sat["installed"] != sat["bundled"]:
+            state = ('<span class="warn">version %s installed - %s available</span> '
+                     % (esc(sat["installed"]), esc(sat["bundled"]))) + btn % "Update"
+        else:
+            state = '<span class="ok">&#10003; installed (version %s)</span>' % esc(sat["installed"])
+        addon_html += ('<div class="status" style="margin-top:12px;flex-wrap:wrap;gap:8px">'
+                       '<b>%s</b> - %s. %s</div>' % (esc(sat["title"]), esc(sat["pitch"]), state))
     # WoW Forever: the same addon runs there too; installing covers both
     forever_old = [f for f in st.get("forever", []) if f["installed"] != st["bundled"]]
     if wow_ok and st.get("forever"):
@@ -3085,6 +3139,31 @@ def install_addon(wow_path):
         print("Removed the old Forge Gold Tracker addon folder.", flush=True)
 
 
+def satellite_status(wow_path):
+    """Optional companion addons for the Settings page: installed vs bundled."""
+    out = []
+    for sid, sat in SATELLITES.items():
+        bundle = os.path.join(RESOURCE_DIR, "addon", sat["folder"])
+        if not os.path.isdir(bundle):
+            continue  # doesn't ship with this build
+        dest = os.path.join(wow_path, "_retail_", "Interface", "AddOns", sat["folder"]) if wow_path else ""
+        out.append({"id": sid, "title": sat["title"], "pitch": sat["pitch"],
+                    "installed": _toc_version(dest, sat["folder"]) if dest else None,
+                    "bundled": _toc_version(bundle, sat["folder"])})
+    return out
+
+
+def install_satellite(wow_path, sid):
+    """Copy one bundled satellite into retail's AddOns. Returns its version."""
+    sat = SATELLITES.get(sid)
+    bundle = os.path.join(RESOURCE_DIR, "addon", sat["folder"]) if sat else ""
+    if not sat or not os.path.isdir(bundle):
+        raise RuntimeError("unknown companion addon")
+    dest = os.path.join(wow_path, "_retail_", "Interface", "AddOns", sat["folder"])
+    shutil.copytree(bundle, dest, dirs_exist_ok=True)
+    return _toc_version(dest, sat["folder"])
+
+
 def check_credentials(client_id, client_secret):
     """Ask Blizzard for an app token with these credentials. Returns an error
     message, or None if Blizzard accepted them."""
@@ -3171,6 +3250,7 @@ def build_api_data():
     for c in chars:
         c["sat"] = {sid: e["chars"][c["key"]]["data"]
                     for sid, e in sats.items() if c["key"] in e["chars"]}
+        apply_live_professions(c, cache.get("synced_at", 0))
     for c in chars:
         g = gold.get(c["key"], {})
         c["cooldowns"] = g.get("cooldowns", [])
@@ -3589,6 +3669,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             wow = str((req or {}).get("wow_path") or "").strip() or detect_wow_path()
             if not wow or not os.path.isdir(os.path.join(wow, "_retail_")):
                 self.send_json({"error": "Set a valid World of Warcraft folder first."}, 400)
+                return
+            sid = (req or {}).get("satellite")
+            if sid:
+                try:
+                    version = install_satellite(wow, str(sid))
+                except Exception as e:
+                    self.send_json({"error": "Couldn't install it: %s" % e}, 500)
+                    return
+                print("Installed satellite %s %s" % (sid, version), flush=True)
+                self.send_json({"ok": True, "version": version})
                 return
             try:
                 install_addon(wow)
