@@ -3,9 +3,12 @@
 # in %LOCALAPPDATA%\ForgesLedger instead; these cover running from source.)
 forge_dashboard_*.json
 *.json.tmp
+settings-before-import.json
+update_check.json
 
 # Private planning docs (premium/Patreon plans, compliance notes)
 PREMIUM_SPEC.md
+specs/
 
 # Old pre-release version - contains personal character names
 forge_dashboard.backup-v1.py

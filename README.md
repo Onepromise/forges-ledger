@@ -34,9 +34,11 @@ Midnight yet, Crafter-tagged characters first, with the totals per profession.
 
 ![Gap planner](docs/screenshots/planner.png)
 
-**Weekly** — a per-character checklist (Great Vault, world boss, weekly
-quests) that clears itself at the weekly reset, plus profession cooldowns
-filled in automatically by the addon.
+**Todo** — daily and weekly tasks per character. The addon checks most of
+them for you from what it sees in game: Great Vault slots, unclaimed Vault
+rewards, Mythic+ runs, raid lockouts, world bosses, profession cooldowns,
+and whether a Timewalking event is on. The rest are checkboxes that clear at
+the daily or weekly reset. Forever has its own, shorter list.
 
 ![Weekly](docs/screenshots/weekly.png)
 
@@ -61,6 +63,10 @@ Forever shows what the addon records: gold, level, class, and rested XP.
 **Several WoW accounts?** One Battle.net login can hold more than one WoW
 account (WoW1, WoW2...). Settings → *WoW accounts* lets you choose which ones
 the dashboard shows; gold and warband banks are read from every account.
+
+**Your data** — Settings can export your choices (tracked characters, roles,
+goals, account picks) to a file and import them on another PC, and open the
+folder where everything is stored.
 
 *Screenshots use example data with made-up character names.*
 

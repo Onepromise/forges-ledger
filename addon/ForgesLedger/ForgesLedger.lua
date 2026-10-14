@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.3 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.4 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -18,7 +18,7 @@
 -- Nothing is sent anywhere. All data stays on your PC.
 
 local ADDON_NAME = "ForgesLedger"
-local VERSION = "2.3"
+local VERSION = "2.4"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -201,6 +201,110 @@ local function QueueCooldownScan()
     C_Timer.After(1, ScanCooldowns)
 end
 
+-- Todo facts: what the game itself knows about this week's progress, for
+-- the app's Todo tab - Great Vault slots, raid and world boss lockouts,
+-- Mythic+ runs. Each part checks the game has the function first (Forever
+-- only has raid lockouts) and is pcall-guarded; anything missing is simply
+-- left out, and the app shows a manual checkbox for it instead. Stored with
+-- the time it was read, so the app never trusts last week's numbers.
+local todoQueued = false
+
+local function SnapshotTodo()
+    todoQueued = false
+    local c = ForgeGoldDB.chars and ForgeGoldDB.chars[CharKey()]
+    if not c then return end
+    local now = time()
+    local t = { at = now }
+    local W = C_WeeklyRewards
+    if W and W.GetActivities then
+        local ok, acts = pcall(W.GetActivities)
+        if ok and type(acts) == "table" and #acts > 0 then
+            -- row names come from the game's own enum, e.g. Raid / Activities / World
+            local names = {}
+            if Enum and Enum.WeeklyRewardChestThresholdType then
+                for k, v in pairs(Enum.WeeklyRewardChestThresholdType) do names[v] = k end
+            end
+            local rows = {}
+            for _, a in ipairs(acts) do
+                local n = names[a.type] or tostring(a.type)
+                local r = rows[n] or { unlocked = 0, total = 0 }
+                r.total = r.total + 1
+                if (a.progress or 0) >= (a.threshold or 1) then r.unlocked = r.unlocked + 1 end
+                rows[n] = r
+            end
+            t.vault = rows
+        end
+        if W.HasAvailableRewards then
+            local ok2, has = pcall(W.HasAvailableRewards)
+            if ok2 then t.vaultClaim = has and true or false end
+        end
+    end
+    if GetNumSavedInstances and GetSavedInstanceInfo then
+        local raids = {}
+        local okN, n = pcall(GetNumSavedInstances)
+        for i = 1, (okN and n or 0) do
+            local ok, name, _, reset, _, locked, _, _, isRaid, _, diffName, numEnc, encProg = pcall(GetSavedInstanceInfo, i)
+            if ok and name and locked and isRaid then
+                tinsert(raids, { name = name, difficulty = diffName, killed = encProg or 0,
+                                 total = numEnc or 0, resetAt = now + (reset or 0) })
+            end
+        end
+        t.raids = raids
+    end
+    if GetNumSavedWorldBosses and GetSavedWorldBossInfo then
+        local bosses = {}
+        local okN, n = pcall(GetNumSavedWorldBosses)
+        for i = 1, (okN and n or 0) do
+            local ok, name, _, reset = pcall(GetSavedWorldBossInfo, i)
+            if ok and name then tinsert(bosses, { name = name, resetAt = now + (reset or 0) }) end
+        end
+        t.worldBosses = bosses
+    end
+    if C_MythicPlus and C_MythicPlus.GetRunHistory then
+        local ok, runs = pcall(C_MythicPlus.GetRunHistory, false, true)
+        if ok and type(runs) == "table" then
+            local count, best = 0, 0
+            for _, r in ipairs(runs) do
+                if r.thisWeek then
+                    count = count + 1
+                    if r.completed and (r.level or 0) > best then best = r.level end
+                end
+            end
+            t.mplus = { runs = count, best = best }
+        end
+    end
+    c.todo = t
+end
+
+-- several of these events can fire together; read once, a moment later
+local function QueueTodoSnapshot()
+    if todoQueued then return end
+    todoQueued = true
+    C_Timer.After(2, SnapshotTodo)
+end
+
+-- Is a Timewalking event on today? Read from the in-game calendar (account-
+-- wide, so stored once). Matches the event's English title.
+local function ScanEvents()
+    local C = C_Calendar
+    if not (C and C.GetNumDayEvents and C.GetDayEvent) then return end
+    local day = tonumber(date("%d"))
+    if C_DateAndTime and C_DateAndTime.GetCurrentCalendarTime then
+        local ok, ct = pcall(C_DateAndTime.GetCurrentCalendarTime)
+        if ok and type(ct) == "table" and ct.monthDay then day = ct.monthDay end
+    end
+    local okN, n = pcall(C.GetNumDayEvents, 0, day)
+    local tw = nil
+    for i = 1, (okN and n or 0) do
+        local ok, ev = pcall(C.GetDayEvent, 0, day, i)
+        if ok and type(ev) == "table" and type(ev.title) == "string"
+                and ev.title:lower():find("timewalking") then
+            tw = ev.title
+        end
+    end
+    ForgeGoldDB.events = { checkedAt = time(), timewalking = tw }
+end
+
 -- Global so the keybinding in Bindings.xml can call it.
 function ForgesLedger_Sync()
     if InCombatLockdown() then
@@ -210,6 +314,7 @@ function ForgesLedger_Sync()
     Snapshot()
     SnapshotWarband()
     if ProfessionWindowOpen() then ScanCooldowns() end
+    SnapshotTodo()
     -- the reload wipes chat, so leave a note and confirm after it
     ForgeGoldDB.syncPending = true
     ReloadUI()
@@ -291,6 +396,11 @@ pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")       -- profession opened
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_ITEM_CRAFTED_RESULT") -- a craft finished
 pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED")        -- includes crafting
+pcall(frame.RegisterEvent, frame, "UPDATE_INSTANCE_INFO")            -- lockouts refreshed
+pcall(frame.RegisterEvent, frame, "WEEKLY_REWARDS_UPDATE")           -- Great Vault changed
+pcall(frame.RegisterEvent, frame, "CHALLENGE_MODE_COMPLETED")        -- Mythic+ run finished
+pcall(frame.RegisterEvent, frame, "BOSS_KILL")                       -- raid/world boss down
+pcall(frame.RegisterEvent, frame, "CALENDAR_UPDATE_EVENT_LIST")      -- calendar loaded
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
@@ -298,6 +408,14 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
     elseif event == "PLAYER_LOGIN" then
         CreateSyncButton()
+        -- ask the game to load this week's lockouts, runs and calendar;
+        -- the matching events above re-read them once they arrive
+        C_Timer.After(3, function()
+            if RequestRaidInfo then pcall(RequestRaidInfo) end
+            if C_MythicPlus and C_MythicPlus.RequestMapInfo then pcall(C_MythicPlus.RequestMapInfo) end
+            if C_Calendar and C_Calendar.OpenCalendar then pcall(C_Calendar.OpenCalendar) end
+            QueueTodoSnapshot()
+        end)
         -- slight delay so everything is initialized
         C_Timer.After(2, function() Snapshot(); SnapshotWarband(); UpdateButton() end)
         if ForgeGoldDB.syncPending then
@@ -317,6 +435,11 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_LIST_UPDATE"
             or event == "TRADE_SKILL_ITEM_CRAFTED_RESULT" then
         QueueCooldownScan()
+    elseif event == "UPDATE_INSTANCE_INFO" or event == "WEEKLY_REWARDS_UPDATE"
+            or event == "CHALLENGE_MODE_COMPLETED" or event == "BOSS_KILL" then
+        QueueTodoSnapshot()
+    elseif event == "CALENDAR_UPDATE_EVENT_LIST" then
+        ScanEvents()
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- a crafted recipe's cooldown starts when its cast finishes
         if arg1 == "player" and ProfessionWindowOpen() then QueueCooldownScan() end

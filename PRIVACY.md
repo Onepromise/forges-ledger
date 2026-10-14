@@ -46,6 +46,10 @@ replaced each time you sync, and **automatically deleted once it is more than
 - Which characters you track (★), your gold goal, your weekly checklist
   checkmarks, and which of your WoW accounts the dashboard shows, stored
   locally in `forge_dashboard_settings.json`.
+- If you use **Export settings**, the file you save contains only these
+  choices and your roles — never your Blizzard login or Blizzard data. Before
+  an **Import**, your current choices are backed up to
+  `settings-before-import.json` in the data folder.
 
 ### 4. Credentials
 - Your Blizzard API client ID and secret (which you create yourself on

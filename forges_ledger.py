@@ -45,7 +45,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.3.2"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.4.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -79,6 +79,23 @@ ROLES_PATH = os.path.join(BASE_DIR, "forge_dashboard_roles.json")
 # (WTF/Account/<account>/SavedVariables/<folder>.lua).
 ADDON_FOLDER = "ForgesLedger"
 OLD_ADDON_FOLDER = "ForgeGoldTracker"  # name before the rename (addon v1.x)
+
+# Optional companion addons ("satellites"). Each is its own addon folder,
+# writes its own save file (named after the folder - WoW's rule) holding one
+# DB table in the shared envelope (specs/SATELLITE_ARCHITECTURE_SPEC.md):
+#   {schemaVersion, version, characters = {["Name-Realm"] = {exportedAt, data}}}
+# schema = the newest envelope version this app understands; anything newer
+# is skipped with a log line rather than misread.
+SATELLITES = {
+    "professions": {
+        "folder": "ForgesLedger_Professions",
+        "db": "ForgesLedgerProfessionsDB",
+        "schema": 1,
+        "title": "Forge's Ledger: Professions",
+        "pitch": "profession leveling guides and shopping lists",
+        "games": ["retail"],  # Retail first; Forever later
+    },
+}
 
 # Roles you can tag a character with on the dashboard (stored in ROLES_PATH).
 ROLES = ["Main", "Farmer", "Crafter", "Bank", "Leveling", "Alt"]
@@ -422,13 +439,18 @@ class LuaParser:
         return arr
 
 
-def parse_savedvariables(text):
-    """Extract the ForgeGoldDB table from a SavedVariables file."""
-    m = re.search(r"ForgeGoldDB\s*=", text)
+def parse_lua_global(text, name):
+    """Extract one global table (e.g. ForgesLedgerProfessionsDB) from a
+    SavedVariables file."""
+    m = re.search(r"\b%s\s*=" % re.escape(name), text)
     if not m:
-        raise LuaParseError("ForgeGoldDB not found in file")
-    parser = LuaParser(text[m.end():])
-    return parser.parse_value()
+        raise LuaParseError("%s not found in file" % name)
+    return LuaParser(text[m.end():]).parse_value()
+
+
+def parse_savedvariables(text):
+    """Extract the core addon's ForgeGoldDB table from its save file."""
+    return parse_lua_global(text, "ForgeGoldDB")
 
 
 # ----------------------------------------------------------------- gold ---
@@ -601,8 +623,15 @@ def _read_addon_db(db, folder, out, warbands):
             "xp_max": c.get("xpMax"),
             "last_seen": c.get("lastSeen", 0) or 0,
             "cooldowns": _cooldowns(c.get("cooldowns")),
+            # addon v2.4+: this week's facts for the Todo tab (absent = manual)
+            "todo": c.get("todo") if isinstance(c.get("todo"), dict) else None,
             "folder": folder,
         }
+    # calendar events (e.g. Timewalking) are the same for every account;
+    # keep the most recently read
+    ev = db.get("events")
+    if isinstance(ev, dict) and ev.get("checkedAt", 0) >= warbands.get("__events__", {}).get("checkedAt", 0):
+        warbands["__events__"] = ev
     # each WoW account has its own warband bank
     w = db.get("warband")
     if isinstance(w, dict) and isinstance(w.get("money"), (int, float)):
@@ -665,6 +694,60 @@ def accounts_info(cache, settings=None):
         a["top"] = ["%s %d" % (n, lv) for lv, n in sorted(a["top"], reverse=True)[:3]]
         a["included"] = not picked or a["id"] in picked
     return sorted(out.values(), key=lambda a: -a["count"])
+
+
+def load_satellites(client=None, game="retail"):
+    """Every satellite's state for one game client:
+    {id: {installed, bundled, chars: {normkey: {exported_at, data, folder}}}}.
+
+    A satellite is "installed" when its addon folder exists in the client's
+    AddOns. Save files that are unreadable, from a newer schema, or not
+    shaped like the envelope are skipped with a log line - a satellite can
+    never break the core dashboard."""
+    if client is None:
+        root = wow_root()
+        client = os.path.join(root, "_retail_") if root else None
+    accounts = wtf_account_dir(client)
+    out = {}
+    for sid, sat in SATELLITES.items():
+        if game not in sat["games"]:
+            continue
+        addon_dir = os.path.join(client, "Interface", "AddOns", sat["folder"]) if client else ""
+        entry = {"installed": os.path.isfile(os.path.join(addon_dir, sat["folder"] + ".toc")),
+                 "bundled": os.path.isdir(os.path.join(RESOURCE_DIR, "addon", sat["folder"])),
+                 "chars": {}}
+        for account in sorted(os.listdir(accounts)) if accounts else []:
+            path = os.path.join(accounts, account, "SavedVariables", sat["folder"] + ".lua")
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    db = parse_lua_global(f.read(), sat["db"])
+                schema = db.get("schemaVersion")
+                if not isinstance(schema, int) or schema > sat["schema"]:
+                    print("Skipping %s (schema %r; this app reads up to %d) - update the app."
+                          % (path, schema, sat["schema"]), flush=True)
+                    continue
+                for key, c in (db.get("characters") or {}).items():
+                    if not isinstance(c, dict) or "-" not in str(key):
+                        continue
+                    name, realm = str(key).split("-", 1)
+                    entry["chars"][norm(name) + "@" + norm(realm)] = {
+                        "exported_at": c.get("exportedAt", 0),
+                        "data": c.get("data") if isinstance(c.get("data"), dict) else {},
+                        "folder": account}
+            except Exception as e:
+                print("Skipping unreadable %s: %s" % (path, e), flush=True)
+        out[sid] = entry
+    return out
+
+
+def satellites_summary(sats):
+    """What the page needs to decide: real view, "no data yet", or install card."""
+    return {sid: {"title": SATELLITES[sid]["title"], "pitch": SATELLITES[sid]["pitch"],
+                  "installed": e["installed"], "bundled": e["bundled"],
+                  "characters": len(e["chars"])}
+            for sid, e in sats.items()}
 
 
 def gold_7d_change(hist):
@@ -1309,17 +1392,41 @@ def update_available():
     return None
 
 
-# -------------------------------------------------------- weekly checklist ---
+# --------------------------------------------------------------- todo ---
 #
-# Manual checkmarks (Great Vault, world boss, weekly quests) are stored with
-# the id of the week they belong to; when the week rolls over they're
-# cleared. Profession cooldowns aren't stored here - they're read live from
-# the addon, so "used" just means "currently on cooldown".
+# Daily and weekly tasks per character. "auto" items are answered from what
+# the addon read in game (addon v2.4+), but only if it was read SINCE the
+# last reset - last week's Great Vault is not this week's. Anything the
+# addon can't see, or hasn't seen yet, falls back to a manual checkbox.
+# Manual ticks are stored with the day/week id and clear on rollover.
+# Catalogs are per game: Forever has no Great Vault, Mythic+ or Sparks.
 
-WEEKLY_ITEMS = [("vault", "Great Vault"), ("worldboss", "World boss"),
-                ("quests", "Weekly quests")]
-# US weekly reset: Tuesday 15:00 UTC (7am Pacific standard / 8am daylight).
-# Any past reset moment works as the anchor; weeks count from it.
+TODO_CATALOG = {
+    "retail": {
+        "daily": [
+            ("cooldowns", "Profession cooldowns", "auto"),
+            ("timewalking", "Timewalking dungeon", "event"),  # only while the event runs
+        ],
+        "weekly": [
+            ("vault", "Great Vault slots", "auto"),
+            ("vaultclaim", "Claim last week's Vault", "auto"),
+            ("mplus", "Mythic+ runs", "auto"),
+            ("raids", "Raid lockouts", "auto"),
+            ("worldboss", "World boss", "auto"),
+            ("quests", "Weekly quests & Sparks", "manual"),
+            ("knowledge", "Profession knowledge treasures", "manual"),
+        ],
+    },
+    "forever": {
+        "daily": [],
+        "weekly": [
+            ("raids", "Raid lockouts", "auto"),
+            ("quests", "Weekly quests", "manual"),
+        ],
+    },
+}
+# US resets: daily at 15:00 UTC, weekly on Tuesday at 15:00 UTC
+# (7am Pacific standard / 8am daylight). Any past reset works as the anchor.
 RESET_ANCHOR = datetime.datetime(2026, 1, 6, 15, 0, tzinfo=datetime.timezone.utc)
 
 
@@ -1328,16 +1435,88 @@ def week_id(now=None):
     return int((now - RESET_ANCHOR.timestamp()) // (7 * 86400))
 
 
+def day_id(now=None):
+    now = now if now is not None else time.time()
+    return int((now - RESET_ANCHOR.timestamp()) // 86400)
+
+
 def next_reset(now=None):
+    """Next weekly reset (unix time)."""
     now = now if now is not None else time.time()
     return int(RESET_ANCHOR.timestamp() + (week_id(now) + 1) * 7 * 86400)
 
 
-def weekly_state(settings):
-    w = settings.get("weekly") or {}
-    checks = w.get("checks", {}) if w.get("week") == week_id() else {}
-    return {"items": [{"id": i, "label": l} for i, l in WEEKLY_ITEMS],
-            "checks": checks, "next_reset": next_reset()}
+def next_daily_reset(now=None):
+    now = now if now is not None else time.time()
+    return int(RESET_ANCHOR.timestamp() + (day_id(now) + 1) * 86400)
+
+
+def todo_checks(settings):
+    """Manual ticks still valid now: {"daily": {key: {item: True}}, "weekly": ...}.
+    Reads the pre-Todo "weekly" checklist too, so this week's ticks survive."""
+    t = settings.get("todo") or {}
+    daily = t.get("daily", {}) if t.get("day") == day_id() else {}
+    weekly = t.get("weekly", {}) if t.get("week") == week_id() else {}
+    old = settings.get("weekly") or {}
+    if not t and old.get("week") == week_id():
+        weekly = old.get("checks", {})
+    return {"daily": daily, "weekly": weekly}
+
+
+def todo_payload(settings, game, events):
+    cat = TODO_CATALOG[game]
+    tw = None
+    if events and events.get("checkedAt", 0) >= next_daily_reset() - 86400:
+        tw = events.get("timewalking")  # read today, so it's current
+    return {"catalog": {period: [{"id": i, "label": l, "kind": k} for i, l, k in items]
+                        for period, items in cat.items()},
+            "checks": todo_checks(settings),
+            "next_daily": next_daily_reset(), "next_weekly": next_reset(),
+            "timewalking": tw}
+
+
+def todo_auto(c, facts):
+    """Auto answers for one character from the addon's facts (+ cooldowns).
+    {item: {"state": "done"|"todo"|"info", "detail": "..."}}; items with no
+    fresh facts are left out, so the page shows a manual checkbox."""
+    out = {}
+    week_start = next_reset() - 7 * 86400
+    now = time.time()
+    cds = c.get("cooldowns") or []
+    if cds:
+        ready = [cd for cd in cds if cd["ready_at"] <= now]
+        out["cooldowns"] = {"state": "todo" if ready else "done",
+                            "detail": ("%d ready" % len(ready)) if ready else "all used"}
+    if not facts or facts.get("at", 0) < week_start:
+        return out  # nothing read since the weekly reset
+    vault = facts.get("vault")
+    if isinstance(vault, dict) and vault:
+        unlocked = sum(r.get("unlocked", 0) for r in vault.values() if isinstance(r, dict))
+        total = sum(r.get("total", 0) for r in vault.values() if isinstance(r, dict))
+        rows = " · ".join("%s %d/%d" % ({"Activities": "Dungeons"}.get(n, n), r.get("unlocked", 0), r.get("total", 0))
+                          for n, r in sorted(vault.items()) if isinstance(r, dict))
+        out["vault"] = {"state": "done" if total and unlocked >= total else "todo",
+                        "detail": "%d/%d · %s" % (unlocked, total, rows)}
+    if "vaultClaim" in facts:
+        out["vaultclaim"] = ({"state": "todo", "detail": "rewards waiting"} if facts["vaultClaim"]
+                             else {"state": "done", "detail": "nothing waiting"})
+    mp = facts.get("mplus")
+    if isinstance(mp, dict):
+        runs = mp.get("runs", 0)
+        out["mplus"] = {"state": "done" if runs >= 8 else "todo",
+                        "detail": "%d/8 runs%s" % (runs, (", best +%d" % mp["best"]) if mp.get("best") else "")}
+    raids = facts.get("raids")
+    if isinstance(raids, list):
+        live = [r for r in raids if isinstance(r, dict) and r.get("resetAt", 0) > now]
+        out["raids"] = ({"state": "done", "detail": " · ".join(
+                            "%s (%s) %d/%d" % (r.get("name"), r.get("difficulty"), r.get("killed", 0), r.get("total", 0))
+                            for r in live)} if live else {"state": "todo", "detail": "none yet"})
+    bosses = facts.get("worldBosses")
+    if isinstance(bosses, list):
+        live = [b for b in bosses if isinstance(b, dict) and b.get("resetAt", 0) > now]
+        out["worldboss"] = ({"state": "done", "detail": ", ".join(str(b.get("name")) for b in live)}
+                            if live else {"state": "todo", "detail": "not killed yet"})
+    return out
 
 
 # ------------------------------------------------------------------ web ---
@@ -1503,7 +1682,7 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
   <button class="tab" data-tab="roster">Roster</button>
   <button class="tab" data-tab="level">Leveling</button>
   <button class="tab" data-tab="profs">Professions</button>
-  <button class="tab" data-tab="weekly">Weekly</button>
+  <button class="tab" data-tab="weekly">Todo</button>
   <button class="tab" data-tab="classes">Classes</button>
   <button class="tab" data-tab="coll">Collections</button>
 </nav>
@@ -1543,7 +1722,7 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
     <span class="count" id="wcount"></span>
   </div>
   <div class="card scroll"><table id="wtable"></table></div>
-  <div class="hint">Checkmarks clear at the weekly reset (Tuesday, US). Profession cooldowns fill in by themselves from the addon: green = used and cooling down, otherwise ready.</div>
+  <div class="hint">Green items are checked by the addon from what it saw in game since the reset; boxes are for you to tick. Daily ticks clear at the daily reset, weekly ticks on Tuesday (US).</div>
 </section>
 
 <section id="tab-profs" hidden>
@@ -1554,6 +1733,7 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
     <span class="count" id="pcount"></span>
   </div>
   <div id="plansum" hidden></div>
+  <div id="satcard"></div>
   <div class="card scroll"><table class="matrix" id="matrix"></table></div>
   <div class="hint" id="phint"></div>
 </section>
@@ -1600,7 +1780,7 @@ let COL=null,colLoading=false;  // collections payload, fetched when the tab is 
 // handy for bookmarks (and how the README screenshots are taken).
 (function(){
   const h=location.hash.slice(1),tabs=["roster","level","profs","weekly","classes","coll"];
-  const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"]};
+  const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"],todo:["weekly",u=>0]};
   if(tabs.includes(h))ui.tab=h;
   else if(extra[h]){ui.tab=extra[h][0];extra[h][1](ui)}
 })();
@@ -1660,10 +1840,10 @@ function header(){
   document.querySelectorAll("#gamesw button").forEach(b=>b.classList.toggle("on",b.dataset.game===D.game));
   $("syncbtn").hidden=D.game==="forever";
   if(D.game==="forever"){
-    si.innerHTML="WoW Forever · "+D.characters.length+" characters · from the Forge&#39;s Ledger addon"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):"");
+    si.innerHTML="Forever · "+D.characters.length+" character"+(D.characters.length===1?"":"s")+" · from the Forge&#39;s Ledger addon"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):"");
     let fa="";
     if(D.addon_error)fa+='<div class="alert err">'+esc(D.addon_error)+"</div>";
-    if(!D.characters.length)fa+='<div class="alert info">No WoW Forever characters yet. Install the addon in your Forever client (<a href="/setup" style="color:inherit">Settings</a> → Update addon), log into a character, then type <b>/fl sync</b>. Blizzard doesn&#39;t offer Forever character data yet, so everything here comes from the addon.</div>';
+    if(!D.characters.length)fa+='<div class="alert info">No Forever characters yet. Install the addon in your Forever client (<a href="/setup" style="color:inherit">Settings</a> → Update addon), log into a character, then type <b>/fl sync</b>. Blizzard doesn&#39;t offer Forever character data yet, so everything here comes from the addon.</div>';
     $("alert").innerHTML=fa;
     const t=D.totals;renderGoal();
     $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
@@ -1674,7 +1854,7 @@ function header(){
   if(D.synced_at){const m=Math.round((Date.now()/1000-D.synced_at)/60);
     const shown=(D.accounts||[]).filter(a=>a.included),acctNote=shown.length&&shown.length<D.accounts.length
       ?' · showing '+shown.map(a=>esc(a.label)).join(", ")+' (<a href="/setup" style="color:inherit">change</a>)':"";
-    si.innerHTML=esc("Synced with Blizzard "+(m<1?"just now":m<120?m+" min ago":Math.round(m/60)+" h ago")+" · "+D.characters.length+" characters"+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):""))+acctNote;}
+    si.innerHTML=esc("Synced with Blizzard "+(m<1?"just now":m<120?m+" min ago":Math.round(m/60)+" h ago")+" · "+D.characters.length+" character"+(D.characters.length===1?"":"s")+(D.sv_mtime?" · game saved "+agoShort(D.sv_mtime):""))+acctNote;}
   else si.textContent="Never synced — Connect Battle.net, then Sync now.";
   let a="";
   if(new URLSearchParams(location.search).get("ok")){history.replaceState(null,"",location.pathname);if(D.connected)a+='<div class="alert ok">Battle.net connected.</div>';}
@@ -1705,7 +1885,7 @@ function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div clas
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
-  const avail=D&&D.game==="forever"?["roster","level","classes"]:["roster","level","profs","weekly","classes","coll"];
+  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","weekly","classes","coll"];
   if(!avail.includes(ui.tab))ui.tab="roster";
   document.querySelectorAll(".tab").forEach(b=>b.hidden=!avail.includes(b.dataset.tab));
   ["roster","level","profs","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
@@ -1774,7 +1954,20 @@ function recCount(t){
   if(!t.recipes.length&&!tot)return "";
   return '<div class="rc">'+t.recipes.length+(tot?"/"+tot:"")+" recipes</div>";
 }
+// A satellite's place on the page: nothing while it doesn't ship with the
+// app; a small dismissible card while it isn't installed; a "no data yet"
+// note until a character logs in with it.
+function satelliteCard(id){
+  const s=(D.satellites||{})[id];
+  if(!s||!s.bundled)return "";
+  let dismissed=false;try{dismissed=localStorage.getItem("satDismiss_"+id)==="1"}catch(e){}
+  if(!s.installed)return dismissed?"":'<div class="alert info">Install <b>'+esc(s.title)+'</b> for '+esc(s.pitch)+
+    ' — <a href="/setup" style="color:inherit">Settings → Update addon</a> · <a href="#" data-sat-dismiss="'+esc(id)+'" style="color:inherit">Hide</a></div>';
+  if(!s.characters)return '<div class="alert info">'+esc(s.title)+' is installed. Log into a character with it enabled to see its data here.</div>';
+  return "";
+}
 function renderProfs(){
+  $("satcard").innerHTML=satelliteCard("professions");
   const idx=profIndex(),names=Object.keys(idx).sort();
   if(ui.prof&&ui.prof!=="__planner"&&!idx[ui.prof])ui.prof="";
   $("plansum").hidden=true;$("psecwrap").hidden=ui.prof!=="__planner";
@@ -2121,22 +2314,52 @@ function cooldownCell(c){
       ' <span class="exp">'+(used?"ready in "+resetText(g.ready_at).split(" · ")[0]:"ready")+"</span></span>"}).join("");
 }
 function renderWeekly(){
+  // the Todo tab (its internal id stays "weekly" so old bookmarks still work)
   document.querySelectorAll("#wscope button").forEach(b=>b.classList.toggle("on",b.dataset.wscope===ui.wscope));
-  const W=D.weekly,items=W.items;
+  const T=D.todo,cat=T.catalog,periods=["daily","weekly"].filter(p=>(cat[p]||[]).length);
   const rows=D.characters.filter(c=>c.tracked&&(ui.wscope==="all"||c.level>=CAP))
     .sort((a,b)=>b.level-a.level||a.name.localeCompare(b.name));
-  let done=0;
-  $("wtable").innerHTML=rows.length?"<thead><tr><th>Character</th>"+items.map(i=>'<th class="tc">'+esc(i.label)+"</th>").join("")+"<th>Profession cooldowns</th></tr></thead><tbody>"+
-    rows.map(c=>{const ck=W.checks[c.key]||{};
-      return "<tr><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+" · "+c.level+"</div></td>"+
-        items.map(i=>{if(ck[i.id])done++;return '<td class="tc"><input type="checkbox" class="wk" data-key="'+esc(c.key)+'" data-item="'+i.id+'"'+(ck[i.id]?" checked":"")+' aria-label="'+esc(i.label)+" — "+esc(c.name)+'"></td>'}).join("")+
-        "<td>"+cooldownCell(c)+"</td></tr>"}).join("")+"</tbody>"
+  let done=0,total=0;
+  const ticked=(p,c,id)=>!!((T.checks[p]||{})[c.key]||{})[id];
+  const box=(p,c,id,label,hint)=>'<input type="checkbox" class="wk" data-key="'+esc(c.key)+'" data-item="'+id+'"'+(ticked(p,c,id)?" checked":"")+
+    ' aria-label="'+esc(label)+" — "+esc(c.name)+'"'+(hint?' title="'+esc(hint)+'"':"")+">";
+  function cell(p,c,it){
+    const auto=(c.todo||{})[it.id];
+    if(it.id==="cooldowns"){
+      if(!c.cooldowns||!c.cooldowns.length)return '<td><span class="faint" title="No profession cooldowns recorded for this character">—</span></td>';
+      total++;if(auto&&auto.state==="done")done++;
+      return "<td>"+cooldownCell(c)+"</td>";
+    }
+    if(it.kind==="event"){
+      if(!T.timewalking)return '<td class="tc"><span class="faint" title="No Timewalking event today (from the in-game calendar)">—</span></td>';
+      total++;if(ticked(p,c,it.id))done++;
+      return '<td class="tc">'+box(p,c,it.id,it.label)+"</td>";
+    }
+    if(auto&&it.kind==="auto"){
+      // answered by the addon; a manual tick still counts as done
+      const ok=auto.state==="done"||ticked(p,c,it.id);
+      total++;if(ok)done++;
+      return '<td><span class="pill'+(ok?" maxed":"")+'">'+(ok?"✓ ":"")+'<span class="exp" style="color:inherit">'+esc(auto.detail)+"</span></span></td>";
+    }
+    // manual item, or nothing seen by the addon since the reset
+    total++;if(ticked(p,c,it.id))done++;
+    return '<td class="tc">'+box(p,c,it.id,it.label,it.kind==="auto"
+      ?(c.has_addon?"The addon hasn't seen this since the reset - log in with addon v2.4, or tick it yourself":"No addon data for this character - tick it yourself")
+      :"")+"</td>";
+  }
+  const head1="<tr><th></th>"+periods.map(p=>'<th class="tc" colspan="'+cat[p].length+'" style="border-left:1px solid var(--line)">'+(p==="daily"?"Daily":"Weekly")+"</th>").join("")+"</tr>";
+  const head2="<tr><th>Character</th>"+periods.map(p=>cat[p].map((it,i)=>'<th class="tc"'+(i?"":' style="border-left:1px solid var(--line)"')+">"+esc(it.label)+"</th>").join("")).join("")+"</tr>";
+  $("wtable").innerHTML=rows.length?"<thead>"+head1+head2+"</thead><tbody>"+
+    rows.map(c=>"<tr><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+" · "+c.level+(c.has_addon?"":" · manual only")+"</div></td>"+
+      periods.map(p=>cat[p].map(it=>cell(p,c,it)).join("")).join("")+"</tr>").join("")+"</tbody>"
     :'<tbody><tr><td class="empty">No tracked characters'+(ui.wscope==="all"?"":" at "+CAP)+' yet — star (☆) characters on the Roster tab.</td></tr></tbody>';
-  $("wcount").textContent=done+" of "+rows.length*items.length+" done · resets in "+resetText(W.next_reset);
+  const daily=periods.includes("daily")?"daily reset in "+resetText(T.next_daily).split(" · ")[0]+" · ":"";
+  $("wcount").textContent=done+" of "+total+" done · "+daily+"weekly reset in "+resetText(T.next_weekly);
 }
 async function setWeekly(key,item,done){
-  try{await postJSON("/api/weekly",{key,item,done})}catch(e){alert("Couldn't save: "+e.message);load();return}
-  const ck=D.weekly.checks[key]=D.weekly.checks[key]||{};
+  try{await postJSON("/api/todo",{key,item,done})}catch(e){alert("Couldn't save: "+e.message);load();return}
+  const p=(D.todo.catalog.daily||[]).some(i=>i.id===item)?"daily":"weekly";
+  const ck=(D.todo.checks[p]=D.todo.checks[p]||{})[key]=(D.todo.checks[p]||{})[key]||{};
   if(done)ck[item]=true;else delete ck[item];
   renderWeekly();
 }
@@ -2149,9 +2372,10 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game],[data-sat-dismiss]");
   if(!el)return;
-  if(el.dataset.game){if(ui.game!==el.dataset.game){ui.game=el.dataset.game;COL=null;saveUI();load()}}
+  if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
+  else if(el.dataset.game){if(ui.game!==el.dataset.game){ui.game=el.dataset.game;COL=null;saveUI();load()}}
   else if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
   else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
@@ -2230,6 +2454,8 @@ details summary{cursor:pointer;color:var(--accent);font-size:13px;margin-top:4px
 .note{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.6}
 label.acct{display:flex;align-items:baseline;gap:8px;margin:8px 0;color:var(--txt);font-size:14px;cursor:pointer}
 label.acct input{width:auto;accent-color:var(--accent)}
+.datapath{font-size:12px;word-break:break-all}
+a.btn{text-decoration:none;color:var(--txt)}
 </style></head><body><div class="wrap">
 <h1>%%TITLE%%</h1>
 <div class="sub">%%SUBTITLE%%</div>
@@ -2285,6 +2511,8 @@ label.acct input{width:auto;accent-color:var(--accent)}
 
 %%ACCOUNTS%%
 
+%%DATA%%
+
 <div class="note">Everything stays on this computer: there are no servers, no analytics and no tracking. Read the <a href="/privacy" target="_blank">privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
 World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.</div>
@@ -2296,6 +2524,7 @@ document.addEventListener("click",async e=>{
   try{await navigator.clipboard.writeText(b.dataset.copy);b.textContent="Copied";setTimeout(()=>b.textContent="Copy",1500)}catch(err){}
 });
 document.addEventListener("change",async e=>{
+  if(e.target.id==="import-file")return importSettings(e.target);
   if(!e.target.classList.contains("acct-cb"))return;
   const boxes=[...document.querySelectorAll(".acct-cb")],ids=boxes.filter(b=>b.checked).map(b=>+b.value);
   const st=document.getElementById("acct-status");
@@ -2305,6 +2534,22 @@ document.addEventListener("change",async e=>{
     if(!r.ok)throw new Error("save failed");
     st.textContent="Saved - showing "+ids.length+" of "+boxes.length+" accounts.";
   }catch(err){e.target.checked=!e.target.checked;st.textContent="Couldn't save - try again."}
+});
+async function importSettings(input){
+  const st=document.getElementById("data-status"),file=input.files[0];input.value="";
+  if(!file)return;
+  if(file.size>1048576){st.textContent="That file is too large to be a settings file.";return}
+  try{
+    const r=await fetch("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:await file.text()});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error||"Import failed");
+    st.textContent="Imported - your tracked characters, roles, goals and account picks are restored.";
+    setTimeout(()=>location.reload(),1500);
+  }catch(err){st.textContent=err.message}
+}
+document.addEventListener("click",async e=>{
+  if(e.target.id!=="open-folder")return;
+  try{await fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})}catch(err){}
 });
 async function installAddon(btn){
   btn.disabled=true;btn.textContent="Installing…";
@@ -2377,14 +2622,14 @@ def render_setup(error=None, notice=None, form=None):
     forever_old = [f for f in st.get("forever", []) if f["installed"] != st["bundled"]]
     if wow_ok and st.get("forever"):
         if forever_old:
-            addon_html += ('<div class="status warn">WoW Forever: %s.</div>'
+            addon_html += ('<div class="status warn">Forever: %s.</div>'
                            % ("not installed" if not forever_old[0]["installed"]
                               else "version %s installed - %s is available"
                               % (esc(forever_old[0]["installed"]), esc(st["bundled"]))))
             if st["installed"] == st["bundled"]:  # retail is current: offer the button here
-                addon_html += '<div class="row">' + install_btn % "Install for WoW Forever" + '</div>'
+                addon_html += '<div class="row">' + install_btn % "Install for Forever" + '</div>'
         else:
-            addon_html += ('<div class="status ok">&#10003; WoW Forever: installed (version %s).</div>'
+            addon_html += ('<div class="status ok">&#10003; Forever: installed (version %s).</div>'
                            % esc(st["bundled"]))
 
     alerts = ""
@@ -2417,9 +2662,83 @@ def render_setup(error=None, notice=None, form=None):
                              else "Save and connect to Battle.net"),
         "%%BACK_LINK%%": ('<a href="/">Back to dashboard</a>' if configured else ""),
         "%%ACCOUNTS%%": accounts_card() if configured else "",
+        "%%DATA%%": data_card() if configured else "",
     }.items():
         page = page.replace(k, v)
     return page
+
+
+def data_card():
+    """Settings card: back up / restore your choices, and see where data lives."""
+    return ('<div class="card"><h2><span class="n">7</span>Your data</h2>'
+            '<p class="why">Back up your choices, or bring them to another PC: tracked '
+            'characters, roles, gold goals, WoW account picks and this week\'s Todo ticks. '
+            'Your Blizzard login and cached character data are never included - on a new '
+            'PC you set up your Blizzard key once and the rest syncs in about a minute.</p>'
+            '<div class="row" style="margin-top:4px">'
+            '<a class="btn" href="/api/export" download>Export settings</a>'
+            '<label class="btn" style="margin:0;display:inline-block;color:var(--txt);font-size:14px">'
+            'Import settings<input type="file" id="import-file" accept=".json,application/json" hidden></label>'
+            '<button class="btn" type="button" id="open-folder">Open data folder</button></div>'
+            '<div class="hint" id="data-status">Importing replaces those choices; your current ones '
+            'are saved first as settings-before-import.json in the data folder.</div>'
+            '<div class="hint datapath">Data folder: <code>%s</code></div></div>'
+            % html.escape(BASE_DIR))
+
+
+def export_settings():
+    """The portable part of your data: choices only, no login, no Blizzard data."""
+    st = load_settings()
+    keep = ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo")
+    return {"app": "ForgesLedger", "format": 1, "appVersion": APP_VERSION,
+            "exportedAt": int(time.time()),
+            "settings": {k: st[k] for k in keep if k in st},
+            "roles": load_roles()}
+
+
+def _valid_goal(g):
+    if g is None:
+        return True
+    if not isinstance(g, dict) or not isinstance(g.get("amount"), int) or not 0 < g["amount"] <= 10 ** 10:
+        return False
+    if g.get("deadline"):
+        try:
+            datetime.date.fromisoformat(str(g["deadline"]))
+        except ValueError:
+            return False
+    return True
+
+
+def import_settings(doc):
+    """Check an exported file, back up the current choices, then apply it.
+    Returns an error message, or None on success. Every field is checked -
+    an import file is user-supplied and could be edited by hand."""
+    if not isinstance(doc, dict) or doc.get("app") != "ForgesLedger":
+        return "That isn't a Forge's Ledger settings file."
+    if doc.get("format") != 1:
+        return "This settings file is from a newer version of the app - update the app first."
+    st, roles = doc.get("settings"), doc.get("roles")
+    if not isinstance(st, dict) or not isinstance(roles, dict):
+        return "The settings file is damaged."
+    if not all(isinstance(k, str) for k in st.get("tracked", [])):
+        return "The settings file has an invalid tracked list."
+    if not all(isinstance(k, str) and v in ROLES for k, v in roles.items()):
+        return "The settings file has an invalid role."
+    if not (_valid_goal(st.get("gold_goal")) and _valid_goal(st.get("forever_gold_goal"))):
+        return "The settings file has an invalid gold goal."
+    if not all(isinstance(a, int) for a in st.get("accounts", [])):
+        return "The settings file has an invalid account list."
+    if "todo" in st and not isinstance(st["todo"], dict):
+        return "The settings file has invalid Todo data."
+    with open(os.path.join(BASE_DIR, "settings-before-import.json"), "w", encoding="utf-8") as f:
+        json.dump(export_settings(), f, indent=2)
+    current = load_settings()
+    for k in ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo"):
+        if k in st:
+            current[k] = st[k]
+    save_settings(current)
+    save_roles(roles)
+    return None
 
 
 def accounts_card():
@@ -2562,10 +2881,13 @@ def build_api_data():
     addon_error = None
     try:
         gold, sv_path, warbands = load_gold()
+        warbands_all = dict(warbands)
+        warbands.pop("__events__", None)  # calendar events, not a bank
     except Exception as e:
         # a save file we can't read shouldn't take the whole dashboard down -
         # show the Blizzard data and say what went wrong instead
         gold, sv_path, warbands = {}, find_sv_file(), {}
+        warbands_all = {}
         addon_error = "Couldn't read the addon save file (%s)." % e
     roles = load_roles()
     settings = load_settings()
@@ -2615,9 +2937,20 @@ def build_api_data():
         chars = [c for c in chars if included(c)]
         warbands = {f: w for f, w in warbands.items()
                     if folder_ids.get(f) in picked}
+    # optional companion addons' data, per character ({} when none)
+    try:
+        sats = load_satellites()
+    except Exception as e:
+        print("Satellite scan failed: %s" % e, flush=True)
+        sats = {}
+    for c in chars:
+        c["sat"] = {sid: e["chars"][c["key"]]["data"]
+                    for sid, e in sats.items() if c["key"] in e["chars"]}
     for c in chars:
         g = gold.get(c["key"], {})
         c["cooldowns"] = g.get("cooldowns", [])
+        c["todo"] = todo_auto(c, g.get("todo"))
+        c["has_addon"] = bool(g)
         # rested XP as a % of the current level's XP bar (Blizzard caps the
         # pool at 150%). It's the value when the addon last saw this
         # character - it keeps growing while they rest, so show its date.
@@ -2664,7 +2997,7 @@ def build_api_data():
         "roles": ROLES,
         "version": APP_VERSION,
         "update": update_available(),
-        "weekly": weekly_state(settings),
+        "todo": todo_payload(settings, "retail", warbands_all.get("__events__")),
         "totals": {
             "tracked": len(tracked),
             "at_cap": at_cap,
@@ -2678,6 +3011,7 @@ def build_api_data():
         "gold_goal": gold_goal_status(settings["gold_goal"], goal_series, gold_total),
         "game": "retail", "cap": CAP, "classes": ALL_CLASSES,
         "forever_available": bool(forever_clients()),
+        "satellites": satellites_summary(sats),
         "warband_bank": ({"money": bank, "fmt": fmt_gold(bank),
                           "updated": max(w["updated"] for w in warbands.values()),
                           "gold_7d": bank_7d}
@@ -2716,7 +3050,8 @@ def build_forever_data():
              "faction": g.get("faction", ""), "professions": [], "cooldowns": [],
              "gold": g.get("money", 0), "gold_7d": gold_7d_change(g.get("history", [])),
              "last_login": g.get("last_seen", 0),
-             "tracked": k in tracked_keys, "role": roles.get(k, "")}
+             "tracked": k in tracked_keys, "role": roles.get(k, ""), "has_addon": True}
+        c["todo"] = todo_auto(c, g.get("todo"))
         if g.get("rested") is not None and g.get("xp_max") and c["level"] < FOREVER_CAP:
             c["rested"] = {"pct": min(150, round(g["rested"] * 100.0 / g["xp_max"])),
                            "at": g.get("last_seen", 0)}
@@ -2730,12 +3065,13 @@ def build_forever_data():
     return {
         "game": "forever", "cap": FOREVER_CAP, "classes": classes,
         "forever_available": True,
+        "satellites": {},  # none support Forever yet
         "synced_at": 0, "connected": is_connected(), "syncing": STATE["syncing"],
         "sync_error": None, "sv_path": find_sv_file(), "sv_mtime": STATE["sv_mtime"],
         "addon_error": addon_error, "characters": chars, "catalog_totals": {},
         "expansions": [{"short": s2, "full": f} for s2, f, _p in EXPANSIONS],
         "roles": ROLES, "version": APP_VERSION, "update": update_available(),
-        "weekly": weekly_state(settings), "warband_bank": None,
+        "todo": todo_payload(settings, "forever", None), "warband_bank": None,
         "accounts": accounts_info(load_cache(), settings),
         "totals": {
             "tracked": len(tracked),
@@ -2914,6 +3250,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                          if os.path.exists(UPDATE_PATH) else 0)
             self.send_json({"sv": STATE["sv_mtime"], "cache": cache_mtime,
                             "upd": upd_mtime, "syncing": STATE["syncing"]})
+            return
+
+        if path == "/api/export":
+            body = json.dumps(export_settings(), indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Disposition", 'attachment; filename="forges-ledger-settings-%s.json"'
+                             % datetime.date.today().isoformat())
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         if path == "/api/collections":
@@ -3102,6 +3449,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if parsed.path == "/api/import":
+            if length > 1048576:
+                self.send_json({"error": "That file is too large to be a settings file."}, 413)
+                return
+            if "application/json" not in (self.headers.get("Content-Type") or ""):
+                self.send_json({"error": "json required"}, 415)
+                return
+            try:
+                doc = json.loads(body)
+            except ValueError:
+                self.send_json({"error": "That file isn't valid JSON."}, 400)
+                return
+            err = import_settings(doc)
+            self.send_json({"error": err} if err else {"ok": True}, 400 if err else 200)
+            return
+
+        if parsed.path == "/api/open-folder":
+            # JSON-only like the other POSTs, so a web page can't trigger it
+            if read_json_body(self, body) is None:
+                self.send_json({"error": "bad request"}, 400)
+                return
+            try:
+                os.startfile(BASE_DIR)  # opens File Explorer (Windows only)
+                self.send_json({"ok": True})
+            except (AttributeError, OSError) as e:
+                self.send_json({"error": str(e)}, 500)
+            return
+
         if parsed.path == "/api/accounts":
             req = read_json_body(self, body)
             known = {a["id"] for a in accounts_info(load_cache())}
@@ -3119,22 +3494,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
-        if parsed.path == "/api/weekly":
+        if parsed.path in ("/api/todo", "/api/weekly"):
             req = read_json_body(self, body)
             item = (req or {}).get("item")
-            if not req or not req.get("key") or item not in dict(WEEKLY_ITEMS):
+            period = next((per for cat in TODO_CATALOG.values() for per, items in cat.items()
+                           if item in [i for i, _l, _k in items]), None)
+            if not req or not req.get("key") or not period:
                 self.send_json({"error": "bad request"}, 400)
                 return
             s = load_settings()
-            w = s.get("weekly") or {}
-            if w.get("week") != week_id():
-                w = {"week": week_id(), "checks": {}}  # new week: start clean
-            char = w["checks"].setdefault(str(req["key"]), {})
+            checks = todo_checks(s)  # drops ticks from past days/weeks
+            char = checks[period].setdefault(str(req["key"]), {})
             if req.get("done"):
                 char[item] = True
             else:
                 char.pop(item, None)
-            s["weekly"] = w
+            s["todo"] = {"day": day_id(), "week": week_id(),
+                         "daily": checks["daily"], "weekly": checks["weekly"]}
+            s.pop("weekly", None)  # migrated into "todo"
             save_settings(s)
             self.send_json({"ok": True})
             return
