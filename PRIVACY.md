@@ -21,7 +21,8 @@ Obtained through Blizzard's official Battle.net API using OAuth — you log in
 with your own Blizzard account and explicitly authorize access. It includes:
 - **Per character:** name, realm, level, class, race, faction, active
   specialization, guild name, item level, achievement points, last login time,
-  and profession skill levels and known recipes for every expansion.
+  profession skill levels and known recipes for every expansion, and
+  reputation standings.
 - **Account-wide:** your mount collection, battle pet collection, and
   achievement progress.
 - **Game reference data:** lists of all recipes, mounts, pets and achievements,

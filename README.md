@@ -34,6 +34,11 @@ Midnight yet, Crafter-tagged characters first, with the totals per profession.
 
 ![Gap planner](docs/screenshots/planner.png)
 
+**Reputations** — every reputation grouped by expansion, with how many are
+maxed in each (Exalted, a friendship's top rank, or the last Renown level),
+paragon progress, a "closest to next level" view, and "hide maxed". Shows your
+best standing across the account, or one character's.
+
 **Todo** — daily and weekly tasks per character. The addon checks most of
 them for you from what it sees in game: Great Vault slots, unclaimed Vault
 rewards, Mythic+ runs, raid lockouts, world bosses, profession cooldowns,

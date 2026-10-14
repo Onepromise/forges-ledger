@@ -18,6 +18,7 @@ Open:     http://localhost:8765
 """
 
 import base64
+import concurrent.futures
 import datetime
 import html
 import http.server
@@ -45,7 +46,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.4.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.5.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -1011,9 +1012,11 @@ def sync_all():
             if k not in collections and k in old.get("collections", {}):
                 collections[k] = old["collections"][k]
     game = sync_game_data(old.get("game", {}))
+    sync_reputations(dataset, old)
+    rep_meta = sync_rep_meta(old.get("rep_meta", {}))
     now = int(time.time())
     return {"characters": dataset, "catalog": catalog,
-            "collections": collections, "game": game,
+            "collections": collections, "game": game, "rep_meta": rep_meta,
             "synced_at": now,
             # when login-only data (character list, mounts, pets) was last
             # fetched; the 30-day limit is enforced from this too
@@ -1079,6 +1082,155 @@ def sync_collections(dataset):
         except Exception as e:
             print("  achievements failed: %s" % e, flush=True)
     return out
+
+
+# Reputation standings change slowly and cost one request per character,
+# so they're refreshed once a day rather than on every hourly sync.
+REP_SYNC_EVERY = 86400
+UNGROUPED = "Not grouped by Blizzard"
+
+
+def _compact_rep(x):
+    """One reputation from Blizzard, trimmed to what the tab needs."""
+    st, pa = x.get("standing") or {}, x.get("paragon") or {}
+    return {"nm": (x.get("faction") or {}).get("name", ""), "n": st.get("name", ""),
+            "t": st.get("tier"), "v": st.get("value", 0), "m": st.get("max", 0),
+            "raw": st.get("raw", 0), "r": st.get("renown_level"),
+            "pv": pa.get("value"), "pm": pa.get("max")}
+
+
+def sync_reputations(dataset, old):
+    """Attach each character's reputations (refetched when a day old)."""
+    prev = {norm(c["name"]) + "@" + norm(c.get("realm_slug", "")): c
+            for c in old.get("characters", [])}
+    now, fetched = time.time(), 0
+    for c in dataset:
+        p = prev.get(norm(c["name"]) + "@" + norm(c.get("realm_slug", "")), {})
+        if p.get("reps") is not None and now - p.get("reps_at", 0) < REP_SYNC_EVERY:
+            c["reps"], c["reps_at"] = p["reps"], p["reps_at"]
+            continue
+        try:
+            r = api_get("/profile/wow/character/%s/%s/reputations"
+                        % (c["realm_slug"], urllib.parse.quote(c["name"].lower())))
+            c["reps"] = {str((x.get("faction") or {}).get("id")): _compact_rep(x)
+                         for x in r.get("reputations", []) if (x.get("faction") or {}).get("id")}
+            c["reps_at"] = int(now)
+            fetched += 1
+        except Exception:
+            if p.get("reps") is not None:  # keep yesterday's rather than nothing
+                c["reps"], c["reps_at"] = p["reps"], p.get("reps_at", 0)
+        time.sleep(0.05)
+    if fetched:
+        print("  reputations refreshed for %d characters" % fetched, flush=True)
+
+
+def sync_rep_meta(meta):
+    """Faction reference data (weekly): which expansion each faction belongs
+    to, how many Renown levels it has, and its standing tiers. Blizzard's
+    faction tree has the expansions at the top, so the grouping comes from
+    Blizzard rather than a hand-made list."""
+    if meta and time.time() - meta.get("fetched_at", 0) < CATALOG_MAX_AGE:
+        return meta
+    print("  reputation reference data...", flush=True)
+    try:
+        idx = api_get("/data/wow/reputation-faction/index")
+        roots = idx.get("root_factions", [])
+        factions, tier_ids, seen = {}, set(), set()
+
+        def fetch(fid):
+            try:
+                return api_get("/data/wow/reputation-faction/%s" % fid)
+            except Exception:
+                return None
+
+        # walk the tree one level at a time, ~6 requests in flight - well
+        # under Blizzard's 100/second limit, and ~4x faster than one by one
+        level = [(r["id"], r["name"]) for r in roots]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            while level:
+                level = [(fid, root) for fid, root in level if fid not in seen]
+                seen.update(fid for fid, _ in level)
+                nxt = []
+                for (fid, root), f in zip(level, pool.map(fetch, [fid for fid, _ in level])):
+                    if not f:
+                        continue
+                    tid = (f.get("reputation_tiers") or {}).get("id")
+                    levels = [t.get("level", 0) for t in f.get("renown_tiers") or []]
+                    factions[str(fid)] = {
+                        "name": f.get("name", ""), "root": root, "header": bool(f.get("is_header")),
+                        "renown_max": (max(levels) if levels else None) if f.get("is_renown") else None,
+                        "tiers": tid}
+                    if tid is not None:
+                        tier_ids.add(tid)
+                    nxt.extend((ch["id"], root) for ch in f.get("factions") or [] if ch.get("id"))
+                level = nxt
+        tiers = {}
+        for tid in tier_ids:
+            try:
+                ts = api_get("/data/wow/reputation-tiers/%s" % tid).get("tiers") or []
+                tiers[str(tid)] = {"last": max(t.get("id", 0) for t in ts) if ts else None}
+            except Exception:
+                pass
+        # newest expansion first, as Blizzard lists them; guild-style groups
+        # last. A few old factions (the Aldor, Booty Bay...) sit under groups
+        # Blizzard's data doesn't include, so they have no expansion - shown
+        # as such rather than guessed.
+        order = [r["name"] for r in roots if r["name"] != "Guild"] + ["Guild", UNGROUPED]
+        return {"fetched_at": int(time.time()), "order": order,
+                "factions": factions, "tiers": tiers}
+    except Exception as e:
+        print("  reputation reference data failed: %s" % e, flush=True)
+        return meta
+
+
+def rep_rows(entries, meta):
+    """Display rows for {faction id: (compact rep, best character name)}."""
+    facs, tiers = (meta or {}).get("factions", {}), (meta or {}).get("tiers", {})
+    rows = []
+    for fid, (r, who) in entries.items():
+        m = facs.get(fid, {})
+        if r.get("r") is not None:  # Renown faction
+            top = m.get("renown_max")
+            maxed = bool(top) and r["r"] >= top
+            standing = "Renown %d" % r["r"] + (" of %d" % top if top else "")
+        else:
+            last = (tiers.get(str(m.get("tiers"))) or {}).get("last")
+            # top tier reached: Exalted for classic factions, or the last
+            # rank of a "friendship" faction (Best Friend, etc.)
+            maxed = (last is not None and r.get("t") == last) or (
+                last is None and not r.get("m") and r.get("raw", 0) > 0)
+            standing = r.get("n", "")
+        # round DOWN while unfinished: 5,999 of 6,000 is 99.9%, never "100%"
+        pct = 100.0 if maxed else (math.floor(r.get("v", 0) * 1000.0 / r["m"]) / 10 if r.get("m") else 0.0)
+        rows.append({
+            "id": fid, "name": m.get("name") or r.get("nm") or "Faction %s" % fid,
+            "expansion": m.get("root") or UNGROUPED, "standing": standing,
+            "value": r.get("v", 0), "max": r.get("m", 0), "pct": round(pct, 1),
+            "maxed": maxed, "who": who,
+            "paragon": {"value": r["pv"], "max": r["pm"]} if r.get("pm") else None})
+    return rows
+
+
+def reps_payload(chars, cache, char_key=None):
+    """Account best per faction across the shown characters, or one
+    character's standings. Since The War Within many reputations are shared
+    by the whole warband, so the account view takes the best of anyone."""
+    meta = cache.get("rep_meta", {})
+    with_reps = [c for c in chars if c.get("reps")]
+    if char_key:
+        c = next((c for c in with_reps if c["key"] == char_key), None)
+        entries = {fid: (r, None) for fid, r in (c["reps"] if c else {}).items()}
+    else:
+        entries = {}
+        for c in with_reps:
+            for fid, r in c["reps"].items():
+                if fid not in entries or r.get("raw", 0) > entries[fid][0].get("raw", 0):
+                    entries[fid] = (r, c["name"])
+    return {"order": meta.get("order", []), "rows": rep_rows(entries, meta),
+            "characters": [{"key": c["key"], "name": c["name"], "realm": c.get("realm", ""),
+                            "level": c.get("level", 0), "tracked": c.get("tracked", False)}
+                           for c in with_reps],
+            "has_meta": bool(meta)}
 
 
 def sync_game_data(game):
@@ -1682,6 +1834,7 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
   <button class="tab" data-tab="roster">Roster</button>
   <button class="tab" data-tab="level">Leveling</button>
   <button class="tab" data-tab="profs">Professions</button>
+  <button class="tab" data-tab="reps">Reputations</button>
   <button class="tab" data-tab="weekly">Todo</button>
   <button class="tab" data-tab="classes">Classes</button>
   <button class="tab" data-tab="coll">Collections</button>
@@ -1714,6 +1867,19 @@ input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
   <div class="picks" id="lvnext"></div>
   <div class="card scroll"><table id="lvtable"></table></div>
   <div class="hint">Characters tagged <b>Leveling</b> come first, then whoever is closest to max level, then the most rested. Rested XP is the amount when the addon last saw the character; it keeps growing while they rest.</div>
+</section>
+
+<section id="tab-reps" hidden>
+  <div class="controls">
+    <select id="repchar"></select>
+    <div class="seg" id="repview"><button data-repview="exp">By expansion</button><button data-repview="close">Closest to next</button></div>
+    <label class="chk"><input type="checkbox" id="rephide"> Hide maxed</label>
+    <input type="search" id="repq" placeholder="Search factions">
+    <span class="count" id="repcount"></span>
+  </div>
+  <div id="repsum"></div>
+  <div id="repbody"></div>
+  <div class="hint">Account best shows each faction's highest standing across the characters shown — many reputations are shared by your whole warband. Exalted, a friendship's top rank, or the last Renown level counts as maxed. Blizzard doesn't report whether a paragon reward cache is waiting to be opened, so only paragon progress is shown. Standings refresh once a day.</div>
 </section>
 
 <section id="tab-weekly" hidden>
@@ -1773,13 +1939,13 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",game:"retail"},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
 // handy for bookmarks (and how the README screenshots are taken).
 (function(){
-  const h=location.hash.slice(1),tabs=["roster","level","profs","weekly","classes","coll"];
+  const h=location.hash.slice(1),tabs=["roster","level","profs","reps","weekly","classes","coll"];
   const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"],todo:["weekly",u=>0]};
   if(tabs.includes(h))ui.tab=h;
   else if(extra[h]){ui.tab=extra[h][0];extra[h][1](ui)}
@@ -1831,7 +1997,7 @@ function fillStaticOptions(){
   $("crole").innerHTML+=roleOpts;
   $("q").value=ui.q;$("fcls").value=ui.cls;$("frole").value=ui.role;$("fstar").checked=ui.star;$("flvl").checked=ui.lvl;
   $("pstar").checked=ui.pstar;$("crole").value=ui.crole;$("cq").value=ui.cq;
-  $("lvstar").checked=ui.lvstar;$("lv10").checked=ui.lv10;$("psec").checked=ui.psec;
+  $("lvstar").checked=ui.lvstar;$("lv10").checked=ui.lv10;$("psec").checked=ui.psec;$("rephide").checked=ui.rephide;$("repq").value=ui.repq;
 }
 
 function header(){
@@ -1885,12 +2051,12 @@ function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div clas
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
-  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","weekly","classes","coll"];
+  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","reps","weekly","classes","coll"];
   if(!avail.includes(ui.tab))ui.tab="roster";
   document.querySelectorAll(".tab").forEach(b=>b.hidden=!avail.includes(b.dataset.tab));
-  ["roster","level","profs","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
+  ["roster","level","profs","reps","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
   if(!D)return;
-  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
+  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="reps")renderReps();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
   saveUI();
 }
 
@@ -2364,6 +2530,63 @@ async function setWeekly(key,item,done){
   renderWeekly();
 }
 
+/* ---------------- reputations ---------------- */
+const REPCHAR={};  // one character's standings, fetched when picked
+async function renderReps(){
+  document.querySelectorAll("#repview button").forEach(b=>b.classList.toggle("on",b.dataset.repview===ui.repview));
+  const R=D.reps||{rows:[],characters:[],order:[]};
+  const chars=[...R.characters].sort((a,b)=>(b.tracked-a.tracked)||(b.level-a.level)||a.name.localeCompare(b.name));
+  if(ui.repchar&&!chars.some(c=>c.key===ui.repchar))ui.repchar="";
+  $("repchar").innerHTML='<option value="">Account best (all characters shown)</option>'+
+    chars.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ui.repchar?" selected":"")+">"+(c.tracked?"★ ":"")+esc(c.name)+" — "+esc(c.realm)+" · "+c.level+"</option>").join("");
+  let rows=R.rows;
+  if(ui.repchar){
+    if(!REPCHAR[ui.repchar]){
+      $("repbody").innerHTML='<div class="empty">Loading…</div>';
+      try{REPCHAR[ui.repchar]=(await (await fetch("/api/reps?char="+encodeURIComponent(ui.repchar))).json()).rows}catch(e){REPCHAR[ui.repchar]=[]}
+      if(ui.tab==="reps")renderReps();
+      return;
+    }
+    rows=REPCHAR[ui.repchar];
+  }
+  if(!rows.length){
+    $("repsum").innerHTML="";$("repcount").textContent="";
+    $("repbody").innerHTML='<div class="card"><div class="empty" style="padding:16px">No reputation data yet. Reputations are fetched once a day — hit <b>Sync now</b>, and they appear within a few minutes.</div></div>';
+    return;
+  }
+  const order=R.order.length?R.order:[...new Set(rows.map(r=>r.expansion))];
+  // the summary always counts everything, so filters don't change the score
+  const tally={};rows.forEach(r=>{const t=tally[r.expansion]=tally[r.expansion]||{n:0,maxed:0};t.n++;if(r.maxed)t.maxed++});
+  $("repsum").innerHTML='<div class="psum">'+order.filter(e=>tally[e]).map(e=>'<div class="pcard"><div class="pt">'+esc(e)+'</div><div class="pv2">'+
+    (tally[e].maxed===tally[e].n?'<b class="good">All maxed</b>':"<b>"+tally[e].maxed+"</b> of "+tally[e].n+" maxed")+"</div></div>").join("")+"</div>";
+  const q=ui.repq.trim().toLowerCase();
+  const shown=rows.filter(r=>(!ui.rephide||!r.maxed)&&(!q||r.name.toLowerCase().includes(q)));
+  const maxedAll=rows.filter(r=>r.maxed).length;
+  $("repcount").textContent=maxedAll+" of "+rows.length+" maxed"+(shown.length<rows.length?" · showing "+shown.length:"");
+  const who=!ui.repchar;
+  const line=(r,withExp)=>{
+    const prog=r.maxed?'<span class="good">Maxed</span>':
+      '<div class="lvl" style="min-width:160px"><div class="bar"><i style="width:'+r.pct+'%"></i></div><span class="dim" style="font-size:12px;white-space:nowrap">'+
+      (r.max?r.value.toLocaleString()+" / "+r.max.toLocaleString():"")+"</span></div>";
+    const para=r.paragon?'<div class="lvl" style="min-width:150px" title="Paragon progress toward the next reward cache"><div class="bar"><i style="width:'+
+      Math.min(100,Math.floor(r.paragon.value*1000/r.paragon.max)/10)+'%;background:var(--gold)"></i></div><span class="dim" style="font-size:12px;white-space:nowrap">'+
+      r.paragon.value.toLocaleString()+" / "+r.paragon.max.toLocaleString()+"</span></div>":'<span class="faint">—</span>';
+    return "<tr><td><b>"+esc(r.name)+"</b></td>"+(withExp?'<td class="dim">'+esc(r.expansion)+"</td>":"")+
+      "<td"+(r.maxed?' class="good"':"")+">"+esc(r.standing)+"</td><td>"+prog+"</td><td>"+para+"</td>"+
+      (who?'<td class="dim">'+esc(r.who||"")+"</td>":"")+"</tr>";
+  };
+  const head=withExp=>"<thead><tr><th>Faction</th>"+(withExp?"<th>Expansion</th>":"")+"<th>Standing</th><th>Progress to next</th><th>Paragon</th>"+(who?"<th>Best on</th>":"")+"</tr></thead>";
+  if(ui.repview==="close"){
+    const list=shown.filter(r=>!r.maxed&&r.max).sort((a,b)=>b.pct-a.pct||a.name.localeCompare(b.name));
+    $("repbody").innerHTML='<div class="card scroll"><table>'+head(true)+"<tbody>"+(list.map(r=>line(r,true)).join("")||'<tr><td colspan="6" class="empty">Nothing left to raise here.</td></tr>')+"</tbody></table></div>";
+    return;
+  }
+  $("repbody").innerHTML=order.filter(e=>shown.some(r=>r.expansion===e)).map(e=>{
+    const list=shown.filter(r=>r.expansion===e).sort((a,b)=>(a.maxed-b.maxed)||(b.pct-a.pct)||a.name.localeCompare(b.name));
+    return '<div class="panel-h">'+esc(e)+" · "+tally[e].maxed+" of "+tally[e].n+' maxed</div><div class="card scroll"><table>'+head(false)+"<tbody>"+list.map(r=>line(r,false)).join("")+"</tbody></table></div>";
+  }).join("")||'<div class="card"><div class="empty" style="padding:16px">Nothing matches.</div></div>';
+}
+
 /* ---------------- events ---------------- */
 async function setRole(key,role){
   const r=await fetch("/api/role",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,role})});
@@ -2372,9 +2595,10 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game],[data-sat-dismiss]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
   if(!el)return;
-  if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
+  if(el.dataset.repview){ui.repview=el.dataset.repview;render()}
+  else if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
   else if(el.dataset.game){if(ui.game!==el.dataset.game){ui.game=el.dataset.game;COL=null;saveUI();load()}}
   else if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
@@ -2396,11 +2620,12 @@ document.addEventListener("change",e=>{
   const t=e.target;
   if(t.classList.contains("rolesel"))return setRole(t.dataset.key,t.value);
   if(t.classList.contains("wk"))return setWeekly(t.dataset.key,t.dataset.item,t.checked);
-  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec"};
+  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec",repchar:"repchar",rephide:"rephide"};
   if(map[t.id]){ui[map[t.id]]=t.type==="checkbox"?t.checked:t.value;render()}
 });
 $("q").addEventListener("input",e=>{ui.q=e.target.value;render()});
 $("cq").addEventListener("input",e=>{ui.cq=e.target.value;render()});
+$("repq").addEventListener("input",e=>{ui.repq=e.target.value;render()});
 $("syncbtn").addEventListener("click",async()=>{
   const j=await (await fetch("/sync",{method:"POST"})).json();
   if(j.needs_connect){location="/connect";return}
@@ -2980,6 +3205,14 @@ def build_api_data():
 
     # only send recipe COUNTS per tier; full names come from /api/catalog/<id>
     # on demand, which keeps this payload small
+    # account-best reputations are summarized here; the raw per-character
+    # lists (~149 each) stay on the server - one character at a time comes
+    # from /api/reps when the page asks for it
+    reps_view = reps_payload(chars, cache)
+    for c in chars:
+        c.pop("reps", None)
+        c.pop("reps_at", None)
+
     catalog_totals = {tid: len(t.get("recipes", {}))
                       for tid, t in cache.get("catalog", {}).items()}
 
@@ -3012,6 +3245,7 @@ def build_api_data():
         "game": "retail", "cap": CAP, "classes": ALL_CLASSES,
         "forever_available": bool(forever_clients()),
         "satellites": satellites_summary(sats),
+        "reps": reps_view,
         "warband_bank": ({"money": bank, "fmt": fmt_gold(bank),
                           "updated": max(w["updated"] for w in warbands.values()),
                           "gold_7d": bank_7d}
@@ -3250,6 +3484,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                          if os.path.exists(UPDATE_PATH) else 0)
             self.send_json({"sv": STATE["sv_mtime"], "cache": cache_mtime,
                             "upd": upd_mtime, "syncing": STATE["syncing"]})
+            return
+
+        if path == "/api/reps":
+            # one character's standings (the account-best view comes with /api/data)
+            key = (qs.get("char") or [""])[0]
+            cache = load_cache()
+            chars = [dict(c, key=norm(c["name"]) + "@" + norm(c.get("realm_slug", "")))
+                     for c in cache.get("characters", [])]
+            self.send_json(reps_payload([c for c in chars if c["key"] == key], cache, key))
             return
 
         if path == "/api/export":
@@ -3535,9 +3778,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/sync":
-            if not is_connected():
-                # not logged in yet - send them to the connect flow
-                # instead of failing
+            # The Battle.net login expires daily, but everything except new
+            # characters and mounts/pets syncs without it (app token). So only
+            # send people to log in when there's nothing synced yet at all.
+            if not is_connected() and not load_cache().get("characters"):
                 self.send_json({"needs_connect": True})
                 return
             threading.Thread(target=do_sync, daemon=True).start()
