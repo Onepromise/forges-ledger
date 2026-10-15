@@ -1,4 +1,4 @@
--- Forge's Ledger: Professions v1.8 (retail)
+-- Forge's Ledger: Professions v1.9 (retail)
 -- A companion to Forge's Ledger, and useful on its own: a panel with your
 -- skill in every expansion's tier of each profession, plus your profession
 -- cooldowns, that opens with the profession window. It also records those
@@ -18,7 +18,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.8"
+local VERSION = "1.9"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -172,6 +172,64 @@ local function ProfessionWindowShown()
     return ProfessionsFrame and ProfessionsFrame:IsShown() and true or false
 end
 
+------------------------------------------------------------ craft counts ---
+-- For the panel's "This session / Last session" line: how many crafts this
+-- character made in a play session, and what. Counted when the open
+-- profession finishes casting one of this character's learned recipes, so
+-- only real crafts count. A session starts at a real login - a /reload
+-- doesn't start a new one. Kept per character in this addon's save file.
+
+local function NewSession()
+    local d = CharData().data
+    if type(d.session) == "table" and (tonumber(d.session.crafts) or 0) > 0 then
+        d.lastSession = d.session  -- the session that just ended becomes "last"
+    end
+    d.session = { startedAt = time(), crafts = 0, made = {} }
+end
+
+local function RecordCraft(spellID)
+    if spellID == nil or (issecretvalue and issecretvalue(spellID)) then return end
+    if not (ProfessionsFrame and ProfessionsFrame:IsShown()) then return end
+    local T = C_TradeSkillUI
+    if not (T and T.GetRecipeInfo) then return end
+    local ok, info = pcall(T.GetRecipeInfo, spellID)
+    if not ok or type(info) ~= "table" or not info.learned or not info.name then return end
+    local c = CharData()
+    local s = c.data.session
+    if type(s) ~= "table" then
+        s = { startedAt = time(), crafts = 0, made = {} }
+        c.data.session = s
+    end
+    s.made = type(s.made) == "table" and s.made or {}
+    s.crafts = (tonumber(s.crafts) or 0) + 1
+    local m = type(s.made[info.name]) == "table" and s.made[info.name] or { count = 0 }
+    m.count = (tonumber(m.count) or 0) + 1
+    m.icon = info.icon or m.icon
+    s.made[info.name] = m
+    c.exportedAt = time()
+    return true
+end
+
+-- "This session: 14 crafts - most made: Arcanoweave Bolt x9" while there
+-- are crafts this session, else the last session's; nil if neither.
+local function SessionLine()
+    local d = CharData().data
+    local s, label = d.session, "This session"
+    if type(s) ~= "table" or (tonumber(s.crafts) or 0) == 0 then
+        s, label = d.lastSession, "Last session"
+    end
+    local n = type(s) == "table" and tonumber(s.crafts) or 0
+    if n == 0 then return nil end
+    local best, bestN, icon
+    for name, m in pairs(type(s.made) == "table" and s.made or {}) do
+        if type(m) == "table" and (tonumber(m.count) or 0) > (bestN or 0) then
+            best, bestN, icon = name, tonumber(m.count), m.icon
+        end
+    end
+    return label .. ": " .. n .. (n == 1 and " craft" or " crafts")
+        .. (best and ("  \194\183  most made: " .. best .. " \195\151" .. bestN) or ""), icon
+end
+
 ---------------------------------------------------------------- events ---
 
 -- the Ledger panel (below) replaces these
@@ -199,9 +257,15 @@ pcall(frame.RegisterEvent, frame, "TRADE_SKILL_SHOW")
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_CLOSE")
 pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
 pcall(frame.RegisterEvent, frame, "SKILL_LINES_CHANGED")      -- skill went up
-frame:SetScript("OnEvent", function(_, event)
+pcall(frame.RegisterEvent, frame, "PLAYER_ENTERING_WORLD")    -- login vs. /reload
+pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED") -- a craft finished
+frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "PLAYER_LOGIN" then
         C_Timer.After(5, Scan)  -- give the game a moment to load profession data
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        if a1 then NewSession() end  -- a real login, not a /reload or zoning
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        if a1 == "player" and RecordCraft(a3) then RefreshHub() end
     elseif event == "TRADE_SKILL_CLOSE" then
         AutoCloseHub()
     else
@@ -382,10 +446,12 @@ local function SpellIcon(id)
     end
 end
 
--- This character's primary professions, from the game: name, icon, and the
--- spell that opens it (nil if the game didn't give one). While a secondary
--- profession's window is open (Fishing, Cooking), it gets a tab too - no
--- quick-open needed, its window is already up.
+-- This character's professions, from the game: the two primaries, then
+-- Cooking and Fishing (smaller tabs), each with the spell that opens it
+-- (nil if the game didn't give one). Fishing gets no quick-open: its
+-- spellbook spell casts your fishing line rather than opening a window.
+-- (The game reports which slot is fishing, so no names are matched.)
+-- Any other profession whose window is open gets a tab while it's open.
 local function PrimaryProfessions()
     local list = {}
     if not (GetProfessions and GetProfessionInfo) then return list end
@@ -401,11 +467,21 @@ local function PrimaryProfessions()
             end
         end
     end
+    for _, idx in ipairs({ cook or false, fish or false }) do
+        if idx then
+            local ok2, name, icon, _, _, _, offset = pcall(GetProfessionInfo, idx)
+            if ok2 and name then
+                local spell = idx ~= fish and ProfessionSpell(offset) or nil
+                tinsert(list, { name = name, icon = icon, secondary = true, fishing = idx == fish,
+                                spell = spell and SpellName(spell) and spell or nil })
+            end
+        end
+    end
     local open = ProfessionWindowShown() and OpenProfession()
     if open then
         local known = false
         for _, p in ipairs(list) do if p.name == open then known = true end end
-        for _, idx in ipairs({ fish or false, cook or false, arch or false }) do
+        for _, idx in ipairs({ arch or false }) do
             if not known and idx then
                 local ok2, name, icon = pcall(GetProfessionInfo, idx)
                 if ok2 and name == open then
@@ -620,6 +696,13 @@ local function CreateHub()
     hub.cdEmpty:SetPoint("TOPLEFT", 12, -32)
     hub.cdEmpty:SetTextColor(DIM[1], DIM[2], DIM[3])
 
+    hub.session = hub:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hub.session:SetTextColor(BONE[1] * 0.8, BONE[2] * 0.8, BONE[3] * 0.8)
+    hub.sessionIcon = hub:CreateTexture(nil, "OVERLAY")
+    hub.sessionIcon:SetSize(16, 16)
+    hub.sessionIcon:SetPoint("RIGHT", hub.session, "LEFT", -6, 0)
+    hub.sessionIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
     hub.none = hub:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     hub.none:SetTextColor(DIM[1], DIM[2], DIM[3])
     hub.none:SetText("No professions learned.")
@@ -665,6 +748,8 @@ function Render()
         local t = GetTab(i)
         t.profession, t.spell = p.name, p.spell
         t.icon:SetTexture(p.icon)
+        t.icon:SetSize(p.secondary and 20 or 24, p.secondary and 20 or 24)
+        t.text:SetFontObject(p.secondary and "GameFontNormal" or "GameFontNormalLarge")
         t.text:SetText(p.name)
         local active = p.name == selected
         t.text:SetTextColor((active and GOLD or BONE)[1], (active and GOLD or BONE)[2], (active and GOLD or BONE)[3])
@@ -672,7 +757,7 @@ function Render()
         t.under:SetShown(active)
         t.glow:SetShown(active or readyBy[p.name] == true)
         SetPulse(t.pulse, readyBy[p.name] == true)
-        local w = math.ceil(t.text:GetStringWidth()) + 58
+        local w = math.ceil(t.text:GetStringWidth()) + (p.secondary and 50 or 58)
         t:SetWidth(w)
         t:ClearAllPoints()
         t:SetPoint("TOPLEFT", hub, "TOPLEFT", x, -12)
@@ -683,6 +768,9 @@ function Render()
         hubTabs[i]:Hide()
         SetPulse(hubTabs[i].pulse, false)
     end
+    -- grow sideways if the tabs need more room than the default width
+    local width = math.max(HUB_W, x + 6)
+    hub:SetWidth(width)
     hub.none:SetShown(#profs == 0)
     hub.zone:SetShown(#profs > 0)
     hub.cds:SetShown(#profs > 0 or #cds > 0)
@@ -759,7 +847,7 @@ function Render()
     hub.cds:SetPoint("TOPLEFT", hub, "TOPLEFT", 12, -top)
     hub.cds:SetPoint("RIGHT", hub, "RIGHT", -12, 0)
     local now = time()
-    local cardW = (HUB_W - 24 - 30) / 2
+    local cardW = (width - 24 - 30) / 2
     for i, cd in ipairs(cds) do
         local c = GetCard(i)
         local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
@@ -792,7 +880,19 @@ function Render()
     local rows = math.ceil(#cds / 2)
     local cdsH = #cds > 0 and (32 + rows * (CARD_H + 8) + 2) or 54
     hub.cds:SetHeight(cdsH)
-    hub:SetHeight(top + (hub.cds:IsShown() and cdsH or 0) + 14)
+    local height = top + (hub.cds:IsShown() and cdsH or 0) + 14
+    -- this or the last play session's crafts; hidden until there are any
+    local line, icon = SessionLine()
+    hub.session:SetShown(line ~= nil)
+    hub.sessionIcon:SetShown(line ~= nil)
+    if line then
+        hub.session:SetText(line)
+        hub.sessionIcon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+        hub.session:ClearAllPoints()
+        hub.session:SetPoint("TOP", hub, "TOP", 10, -(height - 4))
+        height = height + 22
+    end
+    hub:SetHeight(height)
 end
 
 -- Open with the same motion as the bar's hover cards: fade in while
@@ -933,6 +1033,7 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
         if #profs == 0 then print(PREFIX .. "No primary professions learned.") end
         for _, p in ipairs(profs) do
             print(PREFIX .. p.name .. ": " .. (p.spell and ("opens with spell " .. p.spell .. " (" .. tostring(SpellName(p.spell)) .. ")")
+                or p.fishing and "switches the panel only (its spellbook spell casts your line)"
                 or "no spell found - the tab switches the panel but can't open the window"))
         end
     elseif cmd == "scan" then

@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.8)
+-- Forge's Ledger: the bar (part of the core addon, v2.9)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -42,7 +42,8 @@ local _, ns = ...
 local C = ns.COLORS
 local W = ns.Windows
 
-local BAR_H, PAD, ICON, DOT = 24, 14, 18, 12
+local BAR_H, PAD, DOT = 24, 14, 12
+local ICON_W, ICON_H = 30, 22  -- the anvil art is 4:3
 local GOLD_CODE = "|cffe6bf40"  -- the gold color, (0.9, 0.75, 0.25), as a text code
 local CHECK = "|TInterface\\Buttons\\UI-CheckBox-Check:16:16|t"
 local BOX = "|TInterface\\Buttons\\UI-CheckBox-Up:16:16|t"
@@ -406,18 +407,22 @@ local function CreateBar()
     bar.edge:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.85)
 
     anvil = CreateFrame("Button", "ForgesLedgerBarAnvil", bar)
-    anvil:SetSize(BAR_H + 6, BAR_H)
+    anvil:SetSize(ICON_W + 8, BAR_H)
     anvil:SetPoint("LEFT", bar, "LEFT", 6, 0)
-    local ring = CreateFrame("Frame", nil, anvil)  -- thin gold frame round the icon
-    ring:SetSize(ICON + 2, ICON + 2)
-    ring:SetPoint("CENTER")
-    ns.Trim(ring, 0.9)
     local icon = anvil:CreateTexture(nil, "ARTWORK")
-    icon:SetSize(ICON, ICON)
     icon:SetPoint("CENTER")
-    -- a built-in blacksmithing icon until the custom anvil art exists
-    icon:SetTexture("Interface\\Icons\\Trade_BlackSmithing")
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    -- the addon's own anvil art (made from the app's icon). The art is 4:3,
+    -- stored in rows 8-56 of a 64x64 texture (WoW wants power-of-two
+    -- sizes), so only that band is drawn - nearly the bar's full height.
+    -- The game's blacksmithing icon stands in if the file is ever missing.
+    if icon:SetTexture(ns.ANVIL_ART) == false then
+        icon:SetTexture("Interface\\Icons\\Trade_BlackSmithing")
+        icon:SetSize(BAR_H - 6, BAR_H - 6)
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    else
+        icon:SetSize(ICON_W, ICON_H)
+        icon:SetTexCoord(0, 1, 8 / 64, 56 / 64)
+    end
     local hl = anvil:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints(icon)
     hl:SetColorTexture(1, 1, 1, 0.15)

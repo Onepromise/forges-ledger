@@ -1,4 +1,4 @@
--- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.8)
+-- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.9)
 -- One builder makes every window the bar opens - the main Ledger window,
 -- each segment's details, settings - so they all look and behave the same:
 -- a title you can drag, a close button, and a scrolling list of lines.
@@ -9,6 +9,10 @@ local _, ns = ...
 
 local W = {}
 ns.Windows = W
+
+-- the addon's own anvil art: Media\anvil.tga in this addon's folder (64x64,
+-- made from the desktop app's icon). WoW finds the .tga without the extension.
+ns.ANVIL_ART = "Interface\\AddOns\\ForgesLedger\\Media\\anvil"
 
 -- "Tempered Steel" palette, shared with the bar
 ns.COLORS = {
@@ -203,7 +207,7 @@ end
 
 local GREEN = { 0.30, 0.85, 0.45 }
 local CLASS_ICONS = "Interface\\TargetingFrame\\UI-Classes-Circles"
-local ANVIL = "Interface\\Icons\\Trade_BlackSmithing"
+local ANVIL = ns.ANVIL_ART  -- the addon's own anvil (Media/anvil.tga)
 local TIP_PAD, BAR_W, TALL, SHORT = 12, 80, 34, 22
 local tip
 
@@ -291,6 +295,13 @@ end
 
 local function Layout(data)
     tip.icon:SetTexture(data.icon or ANVIL)
+    if data.icon then  -- a game icon: square, trim its border
+        tip.icon:SetSize(18, 18)
+        tip.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    else               -- the anvil art: the 4:3 band in rows 8-56 of its texture
+        tip.icon:SetSize(24, 18)
+        tip.icon:SetTexCoord(0, 1, 8 / 64, 56 / 64)
+    end
     tip.title:SetText(tostring(data.title or ""))
     local rows = type(data.rows) == "table" and data.rows or {}
     local tall = false
