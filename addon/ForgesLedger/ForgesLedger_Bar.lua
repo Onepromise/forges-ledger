@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.7)
+-- Forge's Ledger: the bar (part of the core addon, v2.8)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -20,6 +20,8 @@
 --                                               -- GameTooltip lines (used if no roster)
 --       onClick = function(button) end,         -- optional: run this on click
 --                                               -- instead of opening a window
+--       open = function(toggle) end,            -- optional: the plugin's own window;
+--                                               -- /fl <id> calls it (return true if open)
 --       window  = { title = "Professions",      -- optional: what a click opens
 --                   lines = function() return { { text = "..." } } end },
 --       updateEvents = { "SKILL_LINES_CHANGED" }, -- optional: refresh on these
@@ -125,6 +127,7 @@ local function Register(def, fromCore)
         roster = def.roster,
         window = type(def.window) == "table" and def.window or nil,
         onClick = type(def.onClick) == "function" and def.onClick or nil,
+        open = type(def.open) == "function" and def.open or nil,
         fromCore = fromCore and true or false,
     }
     failed[def.id] = nil
@@ -166,6 +169,10 @@ function ns.OpenWindow(id, toggle)
     if id == "ledger" then return open("ledger", "Forge's Ledger", MainLines) end
     if id == "settings" then return open("settings", "Forge's Ledger - Settings", SettingsLines) end
     local p = plugins[id]
+    if p and p.open then  -- the plugin draws its own window
+        local ok, isOpen = Call(p, p.open, toggle)
+        if ok then return isOpen and true or false end
+    end
     if not (p and p.window) then return nil end
     return open(id, p.window.title or p.label, function()
         local ok, lines = Call(p, p.window.lines)
