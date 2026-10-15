@@ -56,7 +56,7 @@ max-level character yet.
 
 ![Achievements](docs/screenshots/achievements.png)
 
-**Live updates** — the addon's Sync button, a keybind, or `/fl sync` updates
+**Live updates** — Sync on the in-game bar, a keybind, or `/fl sync` updates
 the dashboard within seconds. It also refreshes from Blizzard on startup and
 hourly, and tells you when a new version of the app is out.
 
@@ -96,10 +96,17 @@ character's gold and your warband bank gold, which Blizzard's API doesn't
 provide. It's free and stays
 free — Blizzard's add-on policy requires that.
 
+It also adds a slim **bar** across the top of the screen: gold, Todo, Great
+Vault, Professions and Sync at a glance. Hover a segment for every
+character's numbers; click it for details. Right-click the anvil for options.
+
 - `/fl` — gold total (characters + warband bank)
-- `/fl sync` or the on-screen **Sync** button — update the dashboard now
+- `/fl sync` or **Sync** on the bar — update the dashboard now
   (reloads your UI; WoW only saves addon data on reload, logout, or exit)
-- `/fl button` — show/hide the Sync button (shift-drag to move it)
+- `/fl bar` — show/hide the bar; `/fl bar top`, `/fl bar bottom`,
+  `/fl bar center`, `/fl bar left` to place it
+- `/fl gold`, `/fl todo`, `/fl vault`, `/fl prof`, `/fl settings` — open a
+  window (these work with the bar hidden)
 - `/fl cooldowns` — with a profession window open, list its cooldowns
 - Keybind: Options → Keybindings → AddOns → Forge's Ledger
 - `/forgesledger` works too, if another addon also uses `/fl`

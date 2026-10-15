@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.6)
+-- Forge's Ledger: the bar (part of the core addon, v2.7)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -18,6 +18,8 @@
 --                                               -- characters (see ForgesLedger_Windows.lua)
 --       tooltip = function(tooltip) end,        -- optional, older style: add
 --                                               -- GameTooltip lines (used if no roster)
+--       onClick = function(button) end,         -- optional: run this on click
+--                                               -- instead of opening a window
 --       window  = { title = "Professions",      -- optional: what a click opens
 --                   lines = function() return { { text = "..." } } end },
 --       updateEvents = { "SKILL_LINES_CHANGED" }, -- optional: refresh on these
@@ -61,7 +63,10 @@ local function Settings()
         ForgeGoldDB.bar = s
     end
     if s.enabled == nil then s.enabled = true end
-    if s.anchor ~= "TOP" then s.anchor = "BOTTOM" end
+    -- Docked at the top unless the player has picked a side. Older versions
+    -- saved "BOTTOM" as their default for everyone, so only a choice made
+    -- since v2.7 (anchorChosen) is kept; everyone else moves to the top once.
+    if not s.anchorChosen or (s.anchor ~= "TOP" and s.anchor ~= "BOTTOM") then s.anchor = "TOP" end
     if s.align ~= "LEFT" then s.align = "CENTER" end  -- segments centered unless set to left
     if type(s.hidden) ~= "table" then s.hidden = {} end  -- segment id -> true
     return s
@@ -119,6 +124,7 @@ local function Register(def, fromCore)
         tooltip = def.tooltip,
         roster = def.roster,
         window = type(def.window) == "table" and def.window or nil,
+        onClick = type(def.onClick) == "function" and def.onClick or nil,
         fromCore = fromCore and true or false,
     }
     failed[def.id] = nil
@@ -189,7 +195,9 @@ function ns.SetBarAlign(align)
 end
 
 function ns.SetBarAnchor(side)
-    Settings().anchor = side == "TOP" and "TOP" or "BOTTOM"
+    local s = Settings()
+    s.anchor = side == "BOTTOM" and "BOTTOM" or "TOP"
+    s.anchorChosen = true
     ApplyPosition()
 end
 
@@ -222,8 +230,16 @@ local function Seg(i)
     local hl = s:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.08)
-    s:SetScript("OnClick", function(self)
-        if self.plugin then ns.OpenWindow(self.plugin.id, true) end
+    s:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    s:SetScript("OnClick", function(self, button)
+        local p = self.plugin
+        if not p then return end
+        if p.onClick then
+            ns.HideRoster()
+            Call(p, p.onClick, button)
+        else
+            ns.OpenWindow(p.id, true)
+        end
     end)
     s:SetScript("OnEnter", function(self)
         local p = self.plugin
@@ -238,7 +254,7 @@ local function Seg(i)
         GameTooltip:SetOwner(self, TooltipAnchor())
         GameTooltip:AddLine(p.label, C.gold[1], C.gold[2], C.gold[3])
         if p.tooltip then Call(p, p.tooltip, GameTooltip) end
-        if p.window then GameTooltip:AddLine("Click for details", C.dim[1], C.dim[2], C.dim[3]) end
+        if p.window and not p.onClick then GameTooltip:AddLine("Click for details", C.dim[1], C.dim[2], C.dim[3]) end
         GameTooltip:Show()
     end)
     s:SetScript("OnLeave", function()
@@ -828,6 +844,27 @@ if C_WeeklyRewards then
     }, true)
 end
 
+------------------------------------------------------ core segment: sync ---
+
+-- Saves this character's data and reloads the UI so the app updates now -
+-- what the old floating Sync button did. WoW only writes an addon's file
+-- on reload or logout, and only allows a reload from a real click or key
+-- press, so this can't happen on its own. Turns gold once there's new data
+-- the app hasn't seen for 5+ minutes. Last on the bar.
+Register({
+    id = "sync", label = "Sync", order = 90,
+    updateEvents = { "PLAYER_MONEY" },
+    text = function()
+        return ns.SyncNudge() and (GOLD_CODE .. "Sync now|r") or "Sync"
+    end,
+    onClick = function() ForgesLedger_Sync() end,
+    tooltip = function(tt)
+        tt:AddLine(ns.SavedText(), C.bone[1], C.bone[2], C.bone[3])
+        tt:AddLine("Click to update the app now (reloads your UI).", C.dim[1], C.dim[2], C.dim[3], true)
+        tt:AddLine("Also: the keybind, or /fl sync.", C.dim[1], C.dim[2], C.dim[3], true)
+    end,
+}, true)
+
 ----------------------------------------------- main and settings windows ---
 
 function MainLines()
@@ -871,5 +908,6 @@ function SettingsLines()
                          end })
     end
     tinsert(lines, { text = "/fl bar shows or hides the bar; /fl help lists the windows.", dim = true })
+    tinsert(lines, { text = "With the bar hidden, sync with /fl sync or the keybind.", dim = true })
     return lines
 end

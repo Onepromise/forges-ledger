@@ -1,4 +1,4 @@
--- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.6)
+-- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.7)
 -- One builder makes every window the bar opens - the main Ledger window,
 -- each segment's details, settings - so they all look and behave the same:
 -- a title you can drag, a close button, and a scrolling list of lines.

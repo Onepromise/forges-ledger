@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.6 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.7 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -10,7 +10,7 @@
 -- needs a real key press or click (Blizzard restricts it), so it can't run
 -- on a timer. Ways to sync:
 --   * automatic: logging out, switching characters, exiting the game
---   * the on-screen Sync button (turns gold after 5 min with new data)
+--   * the Sync segment on the bar (turns gold after 5 min with new data)
 --   * a keybind (Options > Keybindings > AddOns > Forge's Ledger)
 --   * /fl sync
 -- The dashboard notices the file change within a couple of seconds.
@@ -22,7 +22,7 @@
 -- private table WoW hands every file of one addon.
 
 local ADDON_NAME, ns = ...
-local VERSION = "2.6"
+local VERSION = "2.7"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -49,7 +49,6 @@ BINDING_HEADER_FORGESLEDGER = "Forge's Ledger"
 BINDING_NAME_FORGESLEDGER_SYNC = "Sync to the app (reloads UI)"
 
 local dirty = false  -- gold/level changed since the file was last written
-local syncButton
 
 local function CharKey()
     local name, realm = UnitFullName("player")
@@ -360,55 +359,15 @@ local function SavedText()
 end
 ns.SavedText = SavedText
 
-local function UpdateButton()
-    if not syncButton then return end
+-- Should the bar's Sync segment nudge? Yes once there's new data and the
+-- app's copy is at least NUDGE_AFTER old. (The Sync button used to float on
+-- its own; since v2.7 it lives on the bar.)
+function ns.SyncNudge()
     local since = ForgeGoldDB.savedAt and (time() - ForgeGoldDB.savedAt) or NUDGE_AFTER
-    if dirty and since >= NUDGE_AFTER then
-        syncButton:SetText("|cffFFD700Sync now|r")
-    else
-        syncButton:SetText("Sync")
-    end
+    return dirty and since >= NUDGE_AFTER
 end
 
-local function CreateSyncButton()
-    local b = CreateFrame("Button", "ForgesLedgerSyncButton", UIParent, "UIPanelButtonTemplate")
-    b:SetSize(86, 22)
-    local p = ForgeGoldDB.buttonPos
-    if p then
-        b:SetPoint(p[1], UIParent, p[1], p[2], p[3])
-    else
-        b:SetPoint("TOP", UIParent, "TOP", 0, -6)
-    end
-    b:SetMovable(true)
-    b:SetClampedToScreen(true)
-    b:RegisterForDrag("LeftButton")
-    b:SetScript("OnDragStart", function(self)
-        if IsShiftKeyDown() then self:StartMoving() end
-    end)
-    b:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        local point, _, _, x, y = self:GetPoint()
-        ForgeGoldDB.buttonPos = { point, x, y }
-    end)
-    b:SetScript("OnClick", function()
-        -- releasing a shift-drag also counts as a click; don't reload on it
-        if IsShiftKeyDown() then return end
-        ForgesLedger_Sync()
-    end)
-    b:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:AddLine("Forge's Ledger")
-        GameTooltip:AddLine(SavedText(), 1, 1, 1)
-        GameTooltip:AddLine("Click to update the app now (reloads your UI).", 0.8, 0.8, 0.8, true)
-        GameTooltip:AddLine("Shift-drag to move. /fl button to hide.", 0.6, 0.6, 0.6, true)
-        GameTooltip:Show()
-    end)
-    b:SetScript("OnLeave", GameTooltip_Hide)
-    if ForgeGoldDB.hideButton then b:Hide() end
-    syncButton = b
-    UpdateButton()
-    C_Timer.NewTicker(15, UpdateButton)
-end
+local function UpdateButton() Changed() end  -- the bar redraws the Sync segment
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
@@ -435,7 +394,6 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             ForgeGoldDB.chars = ForgeGoldDB.chars or {}
         end
     elseif event == "PLAYER_LOGIN" then
-        CreateSyncButton()
         -- ask the game to load this week's lockouts, runs and calendar;
         -- the matching events above re-read them once they arrive
         C_Timer.After(3, function()
@@ -498,7 +456,6 @@ end
 
 -- /fl        : gold total across recorded characters + warband bank
 -- /fl sync   : save now and reload so the app updates immediately
--- /fl button : show/hide the on-screen Sync button
 -- /fl cooldowns : list the open profession's cooldowns (diagnostics)
 -- /fl bar    : show/hide the bar (/fl bar top | bar bottom moves it,
 --              /fl bar center | bar left aligns the segments)
@@ -522,9 +479,8 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
     elseif cmd == "cooldowns" or cmd == "cd" then
         ScanCooldowns(true)
     elseif cmd == "button" then
-        ForgeGoldDB.hideButton = not ForgeGoldDB.hideButton
-        if syncButton then syncButton:SetShown(not ForgeGoldDB.hideButton) end
-        print(PREFIX .. "Sync button " .. (ForgeGoldDB.hideButton and "hidden." or "shown."))
+        -- the old floating button's command; point people at its new home
+        print(PREFIX .. "The Sync button is on the bar now. Hide it in /fl settings; /fl sync still works.")
     elseif cmd == "bar" then
         local on = not ns.BarSettings().enabled
         ns.SetBarEnabled(on)
@@ -544,7 +500,6 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print(PREFIX .. "v" .. VERSION .. " commands:")
         print("  /fl - gold total (characters + warband bank)")
         print("  /fl sync - update the app now (reloads UI)")
-        print("  /fl button - show/hide the Sync button (shift-drag to move it)")
         print("  /fl cooldowns - with a profession window open, list its cooldowns")
         print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
         print("  /fl bar center or /fl bar left - center the segments or keep them on the left")
