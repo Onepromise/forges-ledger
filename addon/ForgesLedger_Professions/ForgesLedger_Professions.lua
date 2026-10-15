@@ -1,22 +1,24 @@
--- Forge's Ledger: Professions v1.7 (retail)
--- A companion to Forge's Ledger, and useful on its own: shows your skill in
--- every expansion's tier of a profession, right beside the profession
--- window. It also records those numbers for the Forge's Ledger app.
+-- Forge's Ledger: Professions v1.8 (retail)
+-- A companion to Forge's Ledger, and useful on its own: a panel with your
+-- skill in every expansion's tier of each profession, plus your profession
+-- cooldowns, that opens with the profession window. It also records those
+-- numbers for the Forge's Ledger app.
 --
--- Step 1 of the satellite plan: record skills + a simple panel. "Best next
+-- Step 1 of the satellite plan: record skills + the panel. "Best next
 -- craft" and the shopping list come next.
 --
 -- Rules it follows (see the app's satellite spec):
 --   * works without the desktop app and without the core addon
 --   * no work every frame - it reads on login and when a profession window
---     opens or changes, never on a timer loop
+--     opens or changes; the only timer is the panel's 1-second countdown,
+--     and that runs only while the panel is open
 --   * every game call is checked to exist and pcall-guarded, so an API
 --     change can't break the game UI
 --   * one save file per account, with a "characters" list, so characters
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.7"
+local VERSION = "1.8"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -147,10 +149,9 @@ local function Scan()
     c.exportedAt = time()
 end
 
----------------------------------------------------------------- the panel ---
-
-local panel, rows = nil, {}
-local ROW_H = 30
+--------------------------------------------------- the open profession ---
+-- (Until v1.8 a small panel sat beside the profession window. The Ledger
+-- panel below replaced it: it opens with the profession window instead.)
 
 local function OpenProfession()
     local T = C_TradeSkillUI
@@ -159,6 +160,7 @@ local function OpenProfession()
     return ok and type(info) == "table" and info.professionName or nil
 end
 
+-- the expansion tier the open window is on, e.g. "Midnight Tailoring"
 local function CurrentTierName()
     local T = C_TradeSkillUI
     if not (T and T.GetChildProfessionInfo) then return nil end
@@ -166,106 +168,26 @@ local function CurrentTierName()
     return ok and type(info) == "table" and info.professionName or nil
 end
 
-local function GetRow(i)
-    if rows[i] then return rows[i] end
-    local r = CreateFrame("Frame", nil, panel)
-    r:SetSize(204, ROW_H)
-    r:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -30 - (i - 1) * ROW_H)
-    r.label = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    r.label:SetPoint("TOPLEFT", 0, 0)
-    r.value = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    r.value:SetPoint("TOPRIGHT", 0, 0)
-    r.bar = CreateFrame("StatusBar", nil, r)
-    r.bar:SetPoint("TOPLEFT", 0, -14)
-    r.bar:SetSize(204, 8)
-    r.bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-    r.bar.bg = r.bar:CreateTexture(nil, "BACKGROUND")
-    r.bar.bg:SetAllPoints()
-    r.bar.bg:SetColorTexture(0, 0, 0, 0.5)
-    rows[i] = r
-    return r
-end
-
-local function UpdatePanel()
-    if not panel then return end
-    local prof = OpenProfession()
-    if ForgesLedgerProfessionsDB.hidePanel or not prof or not (ProfessionsFrame and ProfessionsFrame:IsShown()) then
-        panel:Hide()
-        return
-    end
-    local c = CharData()
-    local list = {}
-    for tierName, t in pairs(c.data.tiers) do
-        if t.profession == prof then
-            tinsert(list, { name = t.expansion or tierName, tier = tierName, skill = t.skill,
-                            max = t.maxSkill, rank = ExpansionRank(t.expansion) })
-        end
-    end
-    -- newest expansion first (by release order, not profession ID)
-    table.sort(list, function(a, b)
-        if a.rank ~= b.rank then return a.rank > b.rank end
-        return a.name < b.name
-    end)
-    local current = CurrentTierName()
-    panel.title:SetText(prof)
-    for i, t in ipairs(list) do
-        local r = GetRow(i)
-        local maxed = t.max > 0 and t.skill >= t.max
-        local unlearned = t.skill <= 0
-        r.label:SetText((t.tier == current and "> " or "") .. t.name)
-        -- not learned yet: 0, with the tier's max when the game reports one
-        r.value:SetText(t.max > 0 and (t.skill .. " / " .. t.max) or tostring(t.skill))
-        r.bar:SetMinMaxValues(0, math.max(1, t.max))
-        r.bar:SetValue(t.skill)
-        r.label:SetAlpha(unlearned and 0.5 or 1)
-        r.value:SetAlpha(unlearned and 0.5 or 1)
-        if maxed then
-            r.bar:SetStatusBarColor(0.30, 0.85, 0.45)  -- green: done
-        elseif t.tier == current then
-            r.bar:SetStatusBarColor(1.00, 0.82, 0.25)  -- gold: the tier you're on
-        else
-            r.bar:SetStatusBarColor(0.45, 0.58, 1.00)
-        end
-        r:Show()
-    end
-    for i = #list + 1, #rows do rows[i]:Hide() end
-    panel.empty:SetShown(#list == 0)
-    panel:SetHeight(40 + math.max(1, #list) * ROW_H)
-    panel:Show()
-end
-
-local function CreatePanel()
-    if panel or not ProfessionsFrame then return end
-    panel = CreateFrame("Frame", "ForgesLedgerProfessionsPanel", ProfessionsFrame, "BackdropTemplate")
-    panel:SetSize(224, 80)
-    panel:SetPoint("TOPLEFT", ProfessionsFrame, "TOPRIGHT", 4, -24)
-    panel:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 14, insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    panel:SetBackdropColor(0.06, 0.07, 0.10, 0.92)
-    panel.title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    panel.title:SetPoint("TOPLEFT", 10, -10)
-    panel.empty = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    panel.empty:SetPoint("TOPLEFT", 10, -32)
-    panel.empty:SetText("No skill recorded yet for this profession.")
-    panel:Hide()
+local function ProfessionWindowShown()
+    return ProfessionsFrame and ProfessionsFrame:IsShown() and true or false
 end
 
 ---------------------------------------------------------------- events ---
 
-local RefreshHub = function() end  -- the Ledger panel (below) replaces this
+-- the Ledger panel (below) replaces these
+local RefreshHub, AutoOpenHub, AutoCloseHub = function() end, function() end, function() end
 
-local queued = false
+local queued, autoOpen = false, false
 local function QueueScan()
     if queued then return end
     queued = true
     C_Timer.After(1, function()
         queued = false
         Scan()
-        CreatePanel()
-        UpdatePanel()
+        if autoOpen then  -- a profession window just opened: bring the panel up with it
+            autoOpen = false
+            AutoOpenHub()
+        end
         RefreshHub()
     end)
 end
@@ -281,8 +203,9 @@ frame:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_LOGIN" then
         C_Timer.After(5, Scan)  -- give the game a moment to load profession data
     elseif event == "TRADE_SKILL_CLOSE" then
-        if panel then panel:Hide() end
+        AutoCloseHub()
     else
+        if event == "TRADE_SKILL_SHOW" then autoOpen = true end
         QueueScan()
     end
 end)
@@ -460,11 +383,13 @@ local function SpellIcon(id)
 end
 
 -- This character's primary professions, from the game: name, icon, and the
--- spell that opens it (nil if the game didn't give one).
+-- spell that opens it (nil if the game didn't give one). While a secondary
+-- profession's window is open (Fishing, Cooking), it gets a tab too - no
+-- quick-open needed, its window is already up.
 local function PrimaryProfessions()
     local list = {}
     if not (GetProfessions and GetProfessionInfo) then return list end
-    local ok, p1, p2 = pcall(GetProfessions)
+    local ok, p1, p2, arch, fish, cook = pcall(GetProfessions)
     if not ok then return list end
     for i = 1, 2 do
         local idx = select(i, p1, p2)
@@ -473,6 +398,20 @@ local function PrimaryProfessions()
             if ok2 and name then
                 local spell = ProfessionSpell(offset)
                 tinsert(list, { name = name, icon = icon, spell = spell and SpellName(spell) and spell or nil })
+            end
+        end
+    end
+    local open = ProfessionWindowShown() and OpenProfession()
+    if open then
+        local known = false
+        for _, p in ipairs(list) do if p.name == open then known = true end end
+        for _, idx in ipairs({ fish or false, cook or false, arch or false }) do
+            if not known and idx then
+                local ok2, name, icon = pcall(GetProfessionInfo, idx)
+                if ok2 and name == open then
+                    tinsert(list, { name = name, icon = icon })
+                    known = true
+                end
             end
         end
     end
@@ -754,8 +693,8 @@ function Render()
         local tiers = {}
         for tierName, t in pairs(CharData().data.tiers) do
             if t.profession == selected then
-                tinsert(tiers, { name = t.expansion or tierName, skill = t.skill or 0, max = t.maxSkill or 0,
-                                 rank = ExpansionRank(t.expansion) })
+                tinsert(tiers, { name = t.expansion or tierName, tier = tierName, skill = t.skill or 0,
+                                 max = t.maxSkill or 0, rank = ExpansionRank(t.expansion) })
             end
         end
         table.sort(tiers, function(a, b)
@@ -776,6 +715,8 @@ function Render()
             d:Show()
         end
         for i = #tiers + 1, #hubDots do hubDots[i]:Hide() end
+        -- the tier the open profession window is on gets a ">" marker
+        local current = ProfessionWindowShown() and CurrentTierName()
         local y = -28
         for i, t in ipairs(tiers) do
             local r = GetTier(i)
@@ -784,7 +725,7 @@ function Render()
             r:SetPoint("RIGHT", hub.zone, "RIGHT")
             local unlearned = t.skill <= 0
             local p = t.max > 0 and math.min(1, t.skill / t.max) or 0
-            r.label:SetText(t.name)
+            r.label:SetText((t.tier == current and "> " or "") .. t.name)
             r.label:SetTextColor(unlearned and DIM[1] or GOLD[1], unlearned and DIM[2] or GOLD[2], unlearned and DIM[3] or GOLD[3])
             r.value:SetText(t.max > 0 and (t.skill .. "/" .. t.max) or tostring(t.skill))
             r.value:SetTextColor(unlearned and DIM[1] or BONE[1], unlearned and DIM[2] or BONE[2], unlearned and DIM[3] or BONE[3])
@@ -880,7 +821,27 @@ local function ToggleHub()
         return false
     end
     ShowHub()
+    hub.auto = false  -- opened by hand: stays open when a profession window closes
     return true
+end
+
+-- With a profession window: open on its tab, close with it - unless the
+-- panel was already open by hand. /flp panel turns this off.
+AutoOpenHub = function()
+    if ForgesLedgerProfessionsDB.hidePanel then return end
+    local open = OpenProfession()
+    local wasShown = hub and hub:IsShown()
+    if open then
+        selected = open
+        ForgesLedgerProfessionsDB.hubTab = open
+    end
+    ShowHub()
+    if not wasShown then hub.auto = true end
+end
+
+AutoCloseHub = function()
+    if hub and hub:IsShown() and hub.auto then hub:Hide() end
+    RefreshHub()  -- drops a Fishing/Cooking tab once its window closes
 end
 
 -- combat: overlays off when it starts, back on when it ends
@@ -959,9 +920,11 @@ SLASH_FORGESLEDGERPROF1 = "/flp"
 SlashCmdList["FORGESLEDGERPROF"] = function(msg)
     local cmd = strtrim((msg or ""):lower())
     if cmd == "panel" then
+        -- (this used to toggle the old side panel; same setting, new panel)
         ForgesLedgerProfessionsDB.hidePanel = not ForgesLedgerProfessionsDB.hidePanel
-        print(PREFIX .. "Panel " .. (ForgesLedgerProfessionsDB.hidePanel and "hidden." or "shown."))
-        UpdatePanel()
+        print(PREFIX .. "The panel " .. (ForgesLedgerProfessionsDB.hidePanel
+            and "won't open with profession windows. /flp open still opens it."
+            or "opens with profession windows."))
     elseif cmd == "open" then
         ToggleHub()
     elseif cmd == "tabs" then
@@ -981,11 +944,11 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
         -- from one the addon dropped
         print(PREFIX .. "The game listed " .. lastSeen.lines .. " profession lines, "
               .. lastSeen.tiers .. " of them expansion tiers.")
-        UpdatePanel()
+        RefreshHub()
     else
         print(PREFIX .. "v" .. VERSION .. " commands:")
         print("  /flp open - open the Ledger panel (tiers and cooldowns)")
-        print("  /flp panel - show/hide the panel beside the profession window")
+        print("  /flp panel - open the panel with profession windows, or not")
         print("  /flp tabs - list the spell each profession tab opens")
         print("  /flp scan - re-read your profession skills now")
     end

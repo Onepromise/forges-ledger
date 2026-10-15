@@ -1,8 +1,8 @@
 ## Interface: 120000, 120100, 120105
 ## Title: Forge's Ledger: Professions
-## Notes: Your profession skill for every expansion at a glance, shown beside the profession window. Optional companion to Forge's Ledger. Type /flp for options.
+## Notes: Your profession skill for every expansion and your cooldowns at a glance, in a panel that opens with your profession window. Optional companion to Forge's Ledger. Type /flp for options.
 ## Author: Forge
-## Version: 1.7
+## Version: 1.8
 ## OptionalDeps: ForgesLedger
 ## SavedVariables: ForgesLedgerProfessionsDB
 ForgesLedger_Professions.lua
