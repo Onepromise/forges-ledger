@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.5)
+-- Forge's Ledger: the bar (part of the core addon, v2.6)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -14,7 +14,10 @@
 --       text  = function()          -- the segment's text; nil or "" hides it
 --           return "Professions: 1 ready", true  -- true = show the gold dot
 --       end,
---       tooltip = function(tooltip) end,        -- optional: add GameTooltip lines
+--       roster  = function() return {...} end,  -- optional: hover card across
+--                                               -- characters (see ForgesLedger_Windows.lua)
+--       tooltip = function(tooltip) end,        -- optional, older style: add
+--                                               -- GameTooltip lines (used if no roster)
 --       window  = { title = "Professions",      -- optional: what a click opens
 --                   lines = function() return { { text = "..." } } end },
 --       updateEvents = { "SKILL_LINES_CHANGED" }, -- optional: refresh on these
@@ -59,6 +62,7 @@ local function Settings()
     end
     if s.enabled == nil then s.enabled = true end
     if s.anchor ~= "TOP" then s.anchor = "BOTTOM" end
+    if s.align ~= "LEFT" then s.align = "CENTER" end  -- segments centered unless set to left
     if type(s.hidden) ~= "table" then s.hidden = {} end  -- segment id -> true
     return s
 end
@@ -113,6 +117,7 @@ local function Register(def, fromCore)
         order = tonumber(def.order) or (old and old.order) or 100,
         text = def.text,
         tooltip = def.tooltip,
+        roster = def.roster,
         window = type(def.window) == "table" and def.window or nil,
         fromCore = fromCore and true or false,
     }
@@ -178,6 +183,11 @@ local function ApplyPosition()
     bar.edge:SetPoint(edge .. "RIGHT")
 end
 
+function ns.SetBarAlign(align)
+    Settings().align = align == "LEFT" and "LEFT" or "CENTER"
+    QueueRefresh()
+end
+
 function ns.SetBarAnchor(side)
     Settings().anchor = side == "TOP" and "TOP" or "BOTTOM"
     ApplyPosition()
@@ -187,6 +197,7 @@ function ns.SetBarEnabled(on)
     Settings().enabled = on and true or false
     if bar then bar:SetShown(on) end
     if menu then menu:Hide() end
+    ns.HideRoster()
     QueueRefresh()
 end
 
@@ -217,23 +228,35 @@ local function Seg(i)
     s:SetScript("OnEnter", function(self)
         local p = self.plugin
         if not p then return end
+        if type(p.roster) == "function" then
+            -- a failing roster shows "Data unavailable"; it doesn't switch
+            -- the whole segment off the way a failing text() does
+            local ok, data = pcall(p.roster)
+            ns.ShowRoster(self, ok and data or nil, p.label)
+            return
+        end
         GameTooltip:SetOwner(self, TooltipAnchor())
         GameTooltip:AddLine(p.label, C.gold[1], C.gold[2], C.gold[3])
         if p.tooltip then Call(p, p.tooltip, GameTooltip) end
         if p.window then GameTooltip:AddLine("Click for details", C.dim[1], C.dim[2], C.dim[3]) end
         GameTooltip:Show()
     end)
-    s:SetScript("OnLeave", GameTooltip_Hide)
+    s:SetScript("OnLeave", function()
+        ns.HideRoster()
+        GameTooltip_Hide()
+    end)
     segs[i] = s
     return s
 end
 
 -- Redraw the segments left to right, skipping hidden ones and plugins with
--- nothing to show, so the rest close up the gap.
+-- nothing to show, so the rest close up the gap. The anvil and segments are
+-- one group: measured first, then placed at the left edge or centered.
 function Refresh()
     if bar and bar:IsShown() then
-        local hidden = Settings().hidden
-        local x = 6 + anvil:GetWidth() + 4
+        local settings = Settings()
+        local hidden = settings.hidden
+        local x = anvil:GetWidth() + 4
         local n = 0
         for _, p in ipairs(Sorted()) do
             if not hidden[p.id] then
@@ -249,12 +272,21 @@ function Refresh()
                     s.label:SetText(tostring(text))
                     local w = math.ceil(s.label:GetStringWidth()) + inset + PAD
                     s:SetWidth(w)
-                    s:ClearAllPoints()
-                    s:SetPoint("LEFT", bar, "LEFT", x, 0)
+                    s.x = x  -- position within the group; placed below
                     s:Show()
                     x = x + w
                 end
             end
+        end
+        local start = 6
+        if settings.align == "CENTER" then
+            start = math.max(6, math.floor((bar:GetWidth() - x) / 2))
+        end
+        anvil:ClearAllPoints()
+        anvil:SetPoint("LEFT", bar, "LEFT", start, 0)
+        for i = 1, n do
+            segs[i]:ClearAllPoints()
+            segs[i]:SetPoint("LEFT", bar, "LEFT", start + segs[i].x, 0)
         end
         for i = n + 1, #segs do
             segs[i]:Hide()
@@ -280,6 +312,8 @@ local function CreateMenu()
         -- label follows where the bar is now (see OnShow below)
         { function() return Settings().anchor == "TOP" and "Move to bottom" or "Move to top" end,
           function() ns.SetBarAnchor(Settings().anchor == "TOP" and "BOTTOM" or "TOP") end },
+        { function() return Settings().align == "LEFT" and "Center the segments" or "Align segments left" end,
+          function() ns.SetBarAlign(Settings().align == "LEFT" and "CENTER" or "LEFT") end },
         { "Settings", function() ns.OpenWindow("settings") end },
         { "Sync now (reloads UI)", function() ForgesLedger_Sync() end },
     }
@@ -383,6 +417,7 @@ local function CreateBar()
     anvil:SetScript("OnLeave", GameTooltip_Hide)
 
     ApplyPosition()
+    bar:SetScript("OnSizeChanged", QueueRefresh)  -- keep centered if the screen/UI scale changes
     bar:SetShown(Settings().enabled)
 end
 
@@ -482,20 +517,18 @@ Register({
         local _, _, _, total = GoldData()
         return GOLD_CODE .. Money(total) .. "|r"
     end,
-    tooltip = function(tt)
+    -- "Where is my gold?" - the 10 richest characters
+    roster = function()
         local list, _, bank, total = GoldData()
+        local rows, footer = {}, {}
         for i, e in ipairs(list) do
-            if i > 15 then
-                tt:AddLine("and " .. (#list - 15) .. " more - click for all", C.dim[1], C.dim[2], C.dim[3])
-                break
-            end
-            local cc = ClassColor(e.class) or C.bone
-            tt:AddDoubleLine(e.name, Money(e.money), cc[1], cc[2], cc[3], C.gold[1], C.gold[2], C.gold[3])
+            if i > 10 then break end
+            tinsert(rows, { name = e.name, class = e.class, value = Money(e.money) })
         end
-        if bank then
-            tt:AddDoubleLine("Warband bank", Money(bank), C.bone[1], C.bone[2], C.bone[3], C.gold[1], C.gold[2], C.gold[3])
-        end
-        tt:AddDoubleLine("Total", Money(total), C.gold[1], C.gold[2], C.gold[3], C.gold[1], C.gold[2], C.gold[3])
+        if #list > 10 then tinsert(footer, "+" .. (#list - 10) .. " more characters") end
+        if bank then tinsert(footer, "Includes the warband bank: " .. Money(bank)) end
+        return { title = "Warband gold: " .. Money(total), icon = "Interface\\Icons\\INV_Misc_Coin_01",
+                 rows = rows, empty = "No characters recorded yet.", footer = footer }
     end,
     window = { title = "Gold", lines = function() return GoldLines(true) end },
 }, true)
@@ -515,8 +548,9 @@ local function WeekStart()
     return sessionStart  -- can't tell when the week began: trust only this session's reads
 end
 
-local function Facts()
-    local c = ForgeGoldDB.chars and ForgeGoldDB.chars[ns.CharKey()]
+-- c = a character's saved record (default: the one you're on)
+local function Facts(c)
+    c = c or (ForgeGoldDB.chars and ForgeGoldDB.chars[ns.CharKey()])
     local f = type(c) == "table" and c.todo
     if type(f) == "table" and (tonumber(f.at) or 0) >= WeekStart() then return f, c end
     return nil, c
@@ -542,11 +576,12 @@ local function VaultTotals(vault)
 end
 
 -- The same automatic items the app's Todo tab answers from this addon's
--- data, for the character you're on. Items the game can't report (weekly
--- quests, knowledge treasures) are ticked in the app, so they aren't here.
-local function TodoItems()
+-- data, for one character (default: the one you're on). Items the game
+-- can't report (weekly quests, knowledge treasures) are ticked in the app,
+-- so they aren't here.
+local function TodoItems(char)
     local items = {}
-    local f, c = Facts()
+    local f, c = Facts(char)
     local function add(label, done, detail)
         tinsert(items, { label = label, done = done and true or false, detail = detail })
     end
@@ -600,12 +635,33 @@ Register({
         for _, it in ipairs(items) do if it.done then done = done + 1 end end
         return "Todo " .. done .. "/" .. #items
     end,
-    tooltip = function(tt)
-        for _, it in ipairs((TodoItems())) do
-            local col = it.done and C.dim or C.bone
-            tt:AddDoubleLine((it.done and CHECK or BOX) .. " " .. it.label, it.detail,
-                col[1], col[2], col[3], C.gold[1], C.gold[2], C.gold[3])
+    -- "What's left today?" - characters with something left, most first
+    roster = function()
+        local list = {}
+        for key, c in pairs(ForgeGoldDB.chars or {}) do
+            if type(c) == "table" then
+                local items = TodoItems(c)
+                local done = 0
+                for _, it in ipairs(items) do if it.done then done = done + 1 end end
+                if #items > 0 and done < #items then
+                    tinsert(list, { name = c.name or key, class = c.class, done = done, total = #items })
+                end
+            end
         end
+        table.sort(list, function(a, b)
+            local ra, rb = a.total - a.done, b.total - b.done
+            if ra ~= rb then return ra > rb end
+            return a.name < b.name
+        end)
+        local rows, footer = {}, {}
+        for i, e in ipairs(list) do
+            if i > 10 then break end
+            tinsert(rows, { name = e.name, class = e.class, value = e.done .. "/" .. e.total,
+                            progress = e.done / e.total })
+        end
+        if #list > 10 then tinsert(footer, "+" .. (#list - 10) .. " more") end
+        return { title = "Today's todos", rows = rows, footer = footer,
+                 empty = "Nothing left that the game reports." }
     end,
     window = { title = "Todo", lines = function()
         local items, fresh = TodoItems()
@@ -622,6 +678,77 @@ Register({
         return lines
     end },
 }, true)
+
+-- "Who needs runs?" Every max-level character below the last Mythic+ vault
+-- slot, fewest runs first. A character whose record is from before this
+-- week's reset is at 0 - the vault starts over each week - so it's shown
+-- as 0, not as last week's numbers. The run targets (8 for Mythic+, ...)
+-- come from the game: this character's own record, or what the game
+-- reported this week on the character you're on.
+local VAULT_ROWS = { { "Activities", "M+" }, { "Raid", "Raid" }, { "World", "World" } }
+
+local function VaultRoster()
+    local mine = Facts()
+    local targets = {}
+    for _, row in ipairs(VAULT_ROWS) do
+        local r = mine and type(mine.vault) == "table" and mine.vault[row[1]]
+        targets[row[1]] = type(r) == "table" and tonumber(r.max) or nil
+    end
+    local maxLevel
+    if GetMaxLevelForPlayerExpansion then
+        local ok, n = pcall(GetMaxLevelForPlayerExpansion)
+        maxLevel = ok and tonumber(n) or nil
+    end
+    local list, complete = {}, 0
+    for key, c in pairs(ForgeGoldDB.chars or {}) do
+        if type(c) == "table" and (not maxLevel or (tonumber(c.level) or 0) >= maxLevel) then
+            local f = Facts(c)  -- nil: nothing read since the reset
+            local parts, mplus = {}, nil
+            for _, row in ipairs(VAULT_ROWS) do
+                local r = f and type(f.vault) == "table" and f.vault[row[1]]
+                local need = type(r) == "table" and tonumber(r.max) or targets[row[1]]
+                local prog
+                if not f then
+                    prog = 0
+                elseif type(r) == "table" then
+                    prog = tonumber(r.progress)  -- nil from an older addon version
+                end
+                if need and need > 0 and prog then
+                    prog = math.min(prog, need)
+                    tinsert(parts, row[2] .. " " .. prog .. "/" .. need)
+                    if row[1] == "Activities" then mplus = { prog, need } end
+                end
+            end
+            if mplus then
+                if mplus[1] >= mplus[2] then
+                    complete = complete + 1
+                else
+                    tinsert(list, { name = c.name or key, class = c.class, prog = mplus[1], need = mplus[2],
+                                    sub = table.concat(parts, " · ", 2) })
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.prog ~= b.prog then return a.prog < b.prog end
+        return a.name < b.name
+    end)
+    local rows, footer, more = {}, {}, {}
+    for i, e in ipairs(list) do
+        if i > 12 then break end
+        tinsert(rows, { name = e.name, class = e.class, value = "M+ " .. e.prog .. "/" .. e.need,
+                        progress = e.prog / e.need, sub = e.sub ~= "" and e.sub or nil })
+    end
+    if complete > 0 then
+        local t = targets.Activities and (targets.Activities .. "/" .. targets.Activities) or "M+"
+        tinsert(more, t .. " complete: " .. complete .. (complete == 1 and " character" or " characters"))
+    end
+    if #list > 12 then tinsert(more, "+" .. (#list - 12) .. " more") end
+    if #more > 0 then tinsert(footer, table.concat(more, " · ")) end
+    return { title = "Great Vault - M+",
+             rows = rows, footer = footer,
+             empty = complete > 0 and "Every character has finished their runs." or "No max-level characters recorded yet." }
+end
 
 -- The Great Vault only exists on retail; WoW Forever doesn't get this segment.
 if C_WeeklyRewards then
@@ -641,17 +768,7 @@ if C_WeeklyRewards then
             if total == 0 then return nil end
             return "Vault: " .. unlocked .. "/" .. total, waiting
         end,
-        tooltip = function(tt)
-            local f = Facts()
-            if not (f and type(f.vault) == "table") then return end
-            for name, r in pairs(f.vault) do
-                if type(r) == "table" and name ~= VAULT_ALT then
-                    tt:AddDoubleLine(VAULT_NAMES[name] or name, (r.unlocked or 0) .. "/" .. (r.total or 0) .. " slots",
-                        C.bone[1], C.bone[2], C.bone[3], C.gold[1], C.gold[2], C.gold[3])
-                end
-            end
-            if f.vaultClaim then tt:AddLine("Rewards waiting to be claimed", C.gold[1], C.gold[2], C.gold[3]) end
-        end,
+        roster = VaultRoster,
         window = { title = "Great Vault", lines = function()
             local f = Facts()
             if not f then
@@ -740,6 +857,9 @@ function SettingsLines()
         { text = "Docked at the " .. (s.anchor == "TOP" and "top" or "bottom") .. " of the screen",
           right = "click to switch", rightColor = C.dim,
           onClick = function() ns.SetBarAnchor(Settings().anchor == "TOP" and "BOTTOM" or "TOP") end },
+        { text = "Segments " .. (s.align == "LEFT" and "on the left" or "centered"),
+          right = "click to switch", rightColor = C.dim,
+          onClick = function() ns.SetBarAlign(Settings().align == "LEFT" and "CENTER" or "LEFT") end },
         { text = "Segments", header = true },
     }
     for _, p in ipairs(Sorted()) do

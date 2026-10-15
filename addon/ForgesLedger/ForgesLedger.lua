@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.5 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.6 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -22,7 +22,7 @@
 -- private table WoW hands every file of one addon.
 
 local ADDON_NAME, ns = ...
-local VERSION = "2.5"
+local VERSION = "2.6"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -500,7 +500,8 @@ end
 -- /fl sync   : save now and reload so the app updates immediately
 -- /fl button : show/hide the on-screen Sync button
 -- /fl cooldowns : list the open profession's cooldowns (diagnostics)
--- /fl bar    : show/hide the bar (/fl bar top | bar bottom moves it)
+-- /fl bar    : show/hide the bar (/fl bar top | bar bottom moves it,
+--              /fl bar center | bar left aligns the segments)
 -- /fl ledger | gold | todo | vault | prof | settings : open a window -
 --              they all work with the bar hidden
 -- /fl help   : list commands
@@ -528,6 +529,9 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         local on = not ns.BarSettings().enabled
         ns.SetBarEnabled(on)
         print(PREFIX .. "Bar " .. (on and "shown." or "hidden. Type /fl bar to show it again."))
+    elseif cmd == "bar center" or cmd == "bar left" then
+        ns.SetBarAlign(cmd == "bar left" and "LEFT" or "CENTER")
+        print(PREFIX .. "Bar segments " .. (cmd == "bar left" and "on the left." or "centered."))
     elseif cmd == "bar top" or cmd == "bar bottom" then
         ns.SetBarAnchor(cmd == "bar top" and "TOP" or "BOTTOM")
         print(PREFIX .. "Bar moved to the " .. (cmd == "bar top" and "top." or "bottom."))
@@ -543,6 +547,7 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print("  /fl button - show/hide the Sync button (shift-drag to move it)")
         print("  /fl cooldowns - with a profession window open, list its cooldowns")
         print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
+        print("  /fl bar center or /fl bar left - center the segments or keep them on the left")
         print("  /fl ledger, /fl gold, /fl todo, /fl vault, /fl prof - open a window")
         print("  /fl settings - bar settings")
         print("  " .. SavedText())

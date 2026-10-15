@@ -1,4 +1,4 @@
--- Forge's Ledger: Professions v1.5 (retail)
+-- Forge's Ledger: Professions v1.6 (retail)
 -- A companion to Forge's Ledger, and useful on its own: shows your skill in
 -- every expansion's tier of a profession, right beside the profession
 -- window. It also records those numbers for the Forge's Ledger app.
@@ -16,7 +16,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.5"
+local VERSION = "1.6"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -300,7 +300,8 @@ local function Cooldowns()
             for _, cd in pairs(ch.cooldowns) do
                 if type(cd) == "table" and type(cd.readyAt) == "number" then
                     tinsert(cd.readyAt <= now and ready or waiting,
-                            { who = ch.name or key, name = cd.name or "?", readyAt = cd.readyAt })
+                            { who = ch.name or key, class = ch.class, name = cd.name or "?",
+                              profession = cd.profession, readyAt = cd.readyAt })
                 end
             end
         end
@@ -353,6 +354,21 @@ if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "fu
             if #ready + #waiting == 0 then return "Professions" end
             return "Professions: " .. #ready .. " ready", #ready > 0
         end,
+        -- hover card (core v2.6+): who has something ready right now
+        roster = function()
+            local ready, waiting = Cooldowns()
+            local rows, footer = {}, {}
+            for i, e in ipairs(ready) do
+                if i > 12 then break end
+                tinsert(rows, { name = e.who, class = e.class, pulse = true,
+                                value = (e.profession and (e.profession .. ": ") or "") .. e.name
+                                        .. "  |cffe6bf40ready now|r", valueColor = { 0.92, 0.90, 0.85 } })
+            end
+            if #ready > 12 then tinsert(footer, "+" .. (#ready - 12) .. " more") end
+            return { title = "Cooldowns ready", rows = rows, footer = footer,
+                     empty = #waiting > 0 and "All cooldowns used." or "No cooldowns tracked yet." }
+        end,
+        -- older cores (v2.5) use this game-tooltip version instead
         tooltip = function(tt)
             local ready = Cooldowns()
             for i, e in ipairs(ready) do
