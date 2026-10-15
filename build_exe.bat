@@ -31,6 +31,7 @@ rem from --specpath, not from this folder)
     --add-data "%~dp0addon;addon" ^
     --add-data "%~dp0PRIVACY.md;." ^
     --add-data "%~dp0forges-ledger.ico;." ^
+    --add-data "%~dp0forges-ledger-anvil.png;." ^
     --workpath "%BUILD%\work" --specpath "%BUILD%" --distpath "%~dp0dist" ^
     "%~dp0forges_ledger.py" || goto :fail
 

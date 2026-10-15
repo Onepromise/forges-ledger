@@ -1716,47 +1716,338 @@ def todo_auto(c, facts):
 
 # ------------------------------------------------------------------ web ---
 
+# --------------------------------------------------------------- themes ---
+#
+# Dashboard themes (specs/DASHBOARD_THEMES.md). Presentation only: a theme is
+# a set of CSS variable values plus a little signature CSS, written into the
+# page head. Every colour the pages use comes from these variables, so this
+# table is the only place the dashboard defines colours. (Exceptions on
+# purpose: WoW's class colours and item-quality colours are game data, not
+# theme.) The in-game addon keeps its own Iron/Bone/Gold look.
+#
+# The choice is a user setting in the app's settings file - not Blizzard
+# data, so it never expires - and travels with Export/Import.
+
+DEFAULT_THEME = "tempered-steel"
+
+# variable -> value. tempered-steel is the original look, value for value;
+# the others override only what they change.
+_STEEL = {
+    "bg": "#0e1015", "surface": "#161920", "surface-2": "#1b1f27", "hover": "#1e232c",
+    "line": "#252a35", "text": "#e6e8ee", "text-dim": "#8b93a5", "faint": "#596173",
+    "gold": "#f5c542", "success": "#4ade80", "danger": "#f87171", "warn": "#fbbf24",
+    "accent": "#7c93ff", "accent-2": "#3b5bfd", "accent-2-hover": "#4d6bff",
+    "accent-glow": "transparent", "on-accent": "#ffffff",
+    "track": "#262b36", "sel": "#232a3a", "detail": "#12151b",
+    "bad-bg": "#2a1517", "bad-line": "#5c2328", "bad-text": "#fecaca",
+    "good-bg": "#11261b", "good-line": "#1f5136", "good-text": "#bbf7d0", "warn-bg": "#2a2312",
+    "silver": "#c9ccd6", "copper": "#d4894b", "pick-line": "#3b4a8a", "pick-bg": "#171c2b",
+    # role tags: the same in every theme
+    "role-main": "#f5c542", "role-main-line": "#5a4a1a",
+    "role-farmer": "#4ade80", "role-farmer-line": "#1f5136",
+    "role-crafter": "#7cb8ff", "role-crafter-line": "#1f3d63",
+    "role-bank": "#c4a7ff", "role-bank-line": "#3d2e66",
+    "role-leveling": "#fb923c", "role-leveling-line": "#5c3216",
+    "role-alt": "#9aa3b5", "role-alt-line": "#363c4a",
+}
+
+
+def _svg(markup):
+    """An inline SVG as a CSS url() value."""
+    return 'url("data:image/svg+xml,%s")' % urllib.parse.quote(markup, safe=" =:/'")
+
+
+_CRESCENT = _svg("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>"
+                 "<path d='M15.5 2.5a9.5 9.5 0 1 0 6 16.6A8 8 0 0 1 15.5 2.5z' fill='#e8b64c'/></svg>")
+def _fill(css, slots):
+    """Put icon/image urls into a theme's CSS (%(name)s slots; %% is a %)."""
+    for k, v in slots.items():
+        css = css.replace("%(" + k + ")s", v)
+    return css.replace("%%", "%")
+
+
+def _icon(body, color):
+    """A small 24x24 line/solid icon as a CSS url(), in one colour."""
+    return _svg("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>%s</svg>" % body.replace("C", color))
+
+
+_I_PERSON = "<circle cx='12' cy='8' r='4' fill='C'/><path d='M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z' fill='C'/>"
+_I_TREND = ("<path d='M3 17l6-6 4 4 8-8M15 7h6v6' fill='none' stroke='C' stroke-width='2' "
+            "stroke-linecap='round' stroke-linejoin='round'/>")
+_I_COIN = ("<circle cx='12' cy='12' r='9' fill='none' stroke='C' stroke-width='1.8'/>"
+           "<path d='M12 6.5v11M14.8 9.2c-.6-.8-1.6-1.2-2.8-1.2-1.6 0-2.8.8-2.8 2s1.2 1.7 2.8 2 2.8.8 2.8 2-1.2 2-2.8 2"
+           "c-1.3 0-2.4-.5-3-1.4' fill='none' stroke='C' stroke-width='1.6' stroke-linecap='round'/>")
+_I_FLAME = "<path d='M12 2c1 4 5 6 5 11a5 5 0 0 1-10 0c0-3 2-4 2-7 1.5 1 2.5 2.5 2.5 4.5C13 8 12 5 12 2z' fill='C'/>"
+_I_MOON = "<path d='M15.5 2.5a9.5 9.5 0 1 0 6 16.6A8 8 0 0 1 15.5 2.5z' fill='C'/>"
+_I_UP = ("<path d='M12 20V5M6 11l6-6 6 6' fill='none' stroke='C' stroke-width='1.8' "
+         "stroke-linecap='round' stroke-linejoin='round'/>")
+_I_SPARK = "<path d='M12 2l2.2 7.8L22 12l-7.8 2.2L12 22l-2.2-7.8L2 12l7.8-2.2z' fill='C'/>"
+
+# ornate divider for Moonlit Tide: waves from both sides meeting at a crescent
+_DIVIDER = _svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='34' viewBox='0 0 640 34'>"
+    "<g fill='none' stroke='#e8eef5' stroke-opacity='.45' stroke-width='1.1'>"
+    "<path d='M0 18 H170 Q200 18 215 12 T260 12 T290 17'/><path d='M640 18 H470 Q440 18 425 12 T380 12 T350 17'/>"
+    "<path d='M120 21 Q200 26 285 21' stroke-opacity='.25'/><path d='M520 21 Q440 26 355 21' stroke-opacity='.25'/></g>"
+    "<path d='M323 6a11 11 0 1 0 7 19.5A9 9 0 0 1 323 6z' fill='#e8b64c'/>"
+    "<g fill='#e8eef5'><circle cx='240' cy='7' r='1.3'/><circle cx='400' cy='6' r='1.3'/>"
+    "<circle cx='300' cy='5' r='.9'/><circle cx='352' cy='27' r='.9'/><circle cx='190' cy='26' r='.8'/>"
+    "<circle cx='455' cy='27' r='.8'/></g></svg>")
+
+def _flames(seed, width, height):
+    """A strip of flame tongues (yellow at the base, fading orange tips) as
+    a CSS url(). It tiles sideways, so the bar's fire can flow."""
+    import random
+    rnd = random.Random(seed)
+    x, tongues = 0.0, []
+    while x < width:
+        w = rnd.uniform(7, 15)
+        w = min(w, width - x)
+        h = rnd.uniform(height * 0.45, height * 0.98)
+        lean = rnd.uniform(-2.5, 2.5)
+        x1, xm = x + w, x + w / 2 + lean
+        tongues.append("M%.1f %d Q%.1f %.1f %.1f %.1f Q%.1f %.1f %.1f %d Z" % (
+            x, height, x + w * 0.15, height - h * 0.55, xm, height - h, x1 - w * 0.15, height - h * 0.55, x1, height))
+        x = x1 - w * 0.25  # tongues overlap a little
+    return _svg(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d' viewBox='0 0 %d %d'>"
+        "<defs><linearGradient id='f' x1='0' y1='1' x2='0' y2='0'>"
+        "<stop offset='0' stop-color='#ffe3a0'/><stop offset='.35' stop-color='#ff9a2e'/>"
+        "<stop offset='.75' stop-color='#ff5a14' stop-opacity='.7'/><stop offset='1' stop-color='#ff3d00' stop-opacity='0'/>"
+        "</linearGradient></defs><path d='%s' fill='url(#f)'/></svg>" % (width, height, width, height, " ".join(tongues)))
+
+
+THEMES = {
+    "tempered-steel": {
+        "name": "Tempered Steel", "family": "Forge",
+        "blurb": "The original: dark steel, gold numbers.",
+        "swatches": ["#0e1015", "#7c93ff", "#f5c542"],
+        "vars": _STEEL, "css": "", "global": "",
+    },
+    "ember-forge": {
+        "name": "Ember Forge", "family": "Forge",
+        "blurb": "Charcoal and molten ember, with fire and drifting sparks.",
+        "swatches": ["#0a0a0c", "#ff6b1a", "#e8b64c"],
+        "vars": {
+            "bg": "#0a0a0c", "surface": "#120f10", "surface-2": "#1a1416", "hover": "#24191a",
+            "line": "#33241d", "text": "#ece7db", "text-dim": "#a69b8d", "faint": "#6f655a",
+            "gold": "#f2c24f", "success": "#7ddc8f", "danger": "#ff7a6b", "warn": "#ffb347",
+            "accent": "#ff6b1a", "accent-2": "#e8590c", "accent-2-hover": "#ff7a2e",
+            "accent-glow": "rgba(255,107,26,.5)", "on-accent": "#fff7ee",
+            "track": "#22160f", "sel": "#2b1a12", "detail": "#0f0c0d",
+            "bad-bg": "#2a1210", "bad-line": "#6b2418", "bad-text": "#ffd0c4",
+            "good-bg": "#12231a", "good-line": "#24533a", "good-text": "#c6f6d5", "warn-bg": "#2a1c0e",
+            "silver": "#cfc8bc", "copper": "#e0884a", "pick-line": "#8a3b12", "pick-bg": "#1d120c",
+        },
+        # one rule per line - each is scoped to this theme automatically
+        "css": """
+body{background:radial-gradient(1200px 520px at 50% 115%,rgba(255,107,26,.16),transparent 62%) fixed,radial-gradient(900px 400px at 85% -10%,rgba(255,90,20,.07),transparent 70%) fixed,var(--bg)}
+.wrap{position:relative;z-index:1}
+h1{font-family:Georgia,"Times New Roman",serif;font-weight:600;font-size:34px;letter-spacing:0}
+h1::before{content:"";display:inline-block;width:46px;height:34px;margin-right:12px;vertical-align:-6px;background:url(/anvil.png) center/contain no-repeat}
+header{position:relative;padding-bottom:14px;border-bottom:1px solid #2a1c14}
+header::after{content:"";position:absolute;right:34%;top:-22px;width:200px;height:150px;background:url(/anvil.png) center/contain no-repeat;opacity:.08;pointer-events:none}
+.btn.primary{background:linear-gradient(180deg,#ff8a3d,#d9480f);border-color:#ff6b1a;box-shadow:0 8px 22px -8px var(--accent-glow),inset 0 1px 0 rgba(255,255,255,.18)}
+.btn.primary:hover{background:linear-gradient(180deg,#ff9a52,#e8590c)}
+.stats{gap:16px}
+.stat{display:flex;flex-direction:column;align-items:center;text-align:center;padding:18px 16px 16px;background:linear-gradient(180deg,rgba(255,107,26,.05),rgba(0,0,0,0) 40%),var(--surface);border:1px solid #4a2a17;border-radius:12px;box-shadow:0 0 0 1px rgba(255,107,26,.06),0 0 18px -6px rgba(255,107,26,.45),inset 0 0 22px -12px rgba(255,107,26,.5)}
+.stat .l{order:1;align-self:stretch;text-align:left;text-transform:uppercase;letter-spacing:.05em;font-weight:600;font-size:12px;color:var(--text);margin:0 0 8px;padding-left:26px;background-position:left center;background-repeat:no-repeat;background-size:18px 18px;min-height:18px}
+.stat .v{order:2;font-size:38px;font-weight:800;line-height:1.1;letter-spacing:-.01em}
+.stat .l.s{order:3;align-self:center;text-align:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;color:var(--text-dim);padding-left:0;background:none;min-height:0;margin:6px 0 0}
+.stat[data-k="chars"] .l:not(.s){background-image:%(i_person)s}
+.stat[data-k="levels"] .l:not(.s){background-image:%(i_trend)s}
+.stat[data-k="gold"] .l:not(.s){background-image:%(i_coin)s}
+.stat[data-k="change"] .l:not(.s){background-image:%(i_trend)s}
+.stat .v .goldv{color:#ffd166;text-shadow:0 0 22px rgba(255,180,60,.45),0 0 2px rgba(255,210,120,.6)}
+.stat[data-k="change"] .v .goldv{color:#ff7a2a;text-shadow:0 0 22px rgba(255,107,26,.5)}
+.goal{background:transparent;border:none;padding:16px 4px 4px;box-shadow:none}
+.goal .gt{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:700;letter-spacing:.03em;color:var(--text)}
+.goal .gt::before{content:"";width:24px;height:24px;background:%(i_flame)s center/contain no-repeat;filter:drop-shadow(0 0 6px rgba(255,107,26,.7))}
+.goal .gv{font-size:18px;text-shadow:0 0 18px rgba(232,182,76,.3)}
+.goal .bar{height:16px;margin:18px 0 12px;border-radius:10px;background:#140d0a;box-shadow:inset 0 0 0 1px #3a2418,0 0 0 4px rgba(255,107,26,.05);overflow:visible;padding:3px}
+.goal .bar>i{position:relative;height:10px;border-radius:6px;background:linear-gradient(90deg,#7c2d12,#c2410c 25%,#ff6b1a 55%,#ffa040 80%,#ffe0a0);background-size:200% 100%;box-shadow:0 0 14px 2px rgba(255,107,26,.55),0 0 34px 4px rgba(255,90,20,.25)}
+.goal .bar>i::before{content:"";position:absolute;left:0;right:-4px;bottom:35%%;height:28px;background:%(flames1)s 0 100%%/120px 28px repeat-x,%(flames2)s 40px 100%%/84px 20px repeat-x;filter:drop-shadow(0 0 5px rgba(255,120,30,.65));transform-origin:bottom;pointer-events:none}
+.goal .bar>i::after{content:"";position:absolute;right:-4px;top:-6px;bottom:-6px;width:14px;border-radius:50%%;background:radial-gradient(circle,#fff6d8,#ffc46b 35%%,rgba(255,107,26,0) 70%%)}
+.bar>i{background:linear-gradient(90deg,#9a3412,#ff6b1a 72%%,#ffb35c);box-shadow:0 0 8px var(--accent-glow)}
+.bar.cap>i{background:var(--success);box-shadow:none}
+.tabs{gap:10px;border-bottom:none;margin:22px 0 18px}
+.tab{flex:1;text-align:center;border:1px solid #33241d;border-radius:10px;background:linear-gradient(180deg,#1d1715,#141012);color:#b3a99c;padding:11px 10px;margin:0;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.tab:hover{color:var(--text);border-color:#4a2f1e}
+.tab.on{color:#ffa45c;border-color:#5a3418;background:linear-gradient(180deg,#24180f,#160f0b);box-shadow:inset 0 -3px 0 #ff6b1a,0 6px 18px -8px var(--accent-glow);text-shadow:0 0 12px var(--accent-glow)}
+.card{border-color:#3d2617;box-shadow:0 0 0 1px rgba(255,107,26,.05),0 0 24px -10px rgba(255,107,26,.4)}
+tbody tr:hover>td{background:rgba(255,107,26,.07)}
+""",
+        # animation and effect layers (not scoped per rule): fire only moves
+        # with "Animated effects" on, and never with reduced motion
+        "global": """
+[data-theme="ember-forge"][data-fx="on"] .goal .bar>i{animation:fl-burn 2.6s linear infinite}
+[data-theme="ember-forge"][data-fx="on"] .goal .bar>i::before{animation:fl-flow 1.5s linear infinite,fl-lick .45s ease-in-out infinite alternate}
+[data-theme="ember-forge"][data-fx="on"] .goal .bar>i::after{animation:fl-flicker .16s ease-in-out infinite alternate}
+@keyframes fl-burn{to{background-position:-200% 0}}
+@keyframes fl-flow{to{background-position:-120px 100%,-44px 100%}}
+@keyframes fl-lick{0%{transform:scaleY(.8);opacity:.85}100%{transform:scaleY(1.12);opacity:1}}
+@keyframes fl-flicker{from{opacity:.7;transform:scale(.85)}to{opacity:1;transform:scale(1.15)}}
+""",
+    },
+    "moonlit-tide": {
+        "name": "Moonlit Tide", "family": "Luna",
+        "blurb": "Moonrise over the ocean, stars and ring gold.",
+        "swatches": ["#0b2b3a", "#e8eef5", "#e8b64c"],
+        "vars": {
+            "bg": "#0b2b3a", "surface": "#0f3547", "surface-2": "#133d51", "hover": "#17465c",
+            "line": "#275a70", "text": "#e8eef5", "text-dim": "#a3b8c7", "faint": "#6f8a9b",
+            "gold": "#f0c25a", "success": "#a6ecc9", "danger": "#f4a0a0", "warn": "#f2c66d",
+            "accent": "#e8b64c", "accent-2": "#2f7a99", "accent-2-hover": "#3a8db0",
+            "accent-glow": "rgba(232,238,245,.35)", "on-accent": "#ffffff",
+            "track": "#082230", "sel": "#1a4d63", "detail": "#0a2836",
+            "bad-bg": "#3a1f28", "bad-line": "#7a3a48", "bad-text": "#ffd6dc",
+            "good-bg": "#0f3a36", "good-line": "#2b6f63", "good-text": "#c9f5e6", "warn-bg": "#3a3218",
+            "silver": "#dfe7ef", "copper": "#e2a26e", "pick-line": "#e8b64c", "pick-bg": "#134257",
+        },
+        "css": """
+body{background:radial-gradient(1300px 700px at 50% 0,rgba(70,150,180,.16),transparent 72%) no-repeat,radial-gradient(900px 500px at 10% 100%,rgba(20,80,110,.35),transparent 70%) fixed,var(--bg)}
+.wrap{position:relative}
+.wrap>*{position:relative;z-index:1}
+.wrap::before{content:"";position:absolute;left:50%%;top:-300px;width:460px;height:460px;margin-left:-230px;border-radius:50%%;background:radial-gradient(circle at 34%% 30%%,rgba(160,175,190,.35) 0 7%%,transparent 7.5%%),radial-gradient(circle at 62%% 58%%,rgba(160,175,190,.3) 0 9%%,transparent 9.5%%),radial-gradient(circle at 46%% 76%%,rgba(160,175,190,.25) 0 5%%,transparent 5.5%%),radial-gradient(circle at 40%% 35%%,#ffffff,#eef3f8 40%%,#cfdbe6 72%%,#aebfcf);box-shadow:0 0 90px 30px rgba(220,235,250,.28),0 0 260px 90px rgba(150,200,230,.14);opacity:.9;pointer-events:none;z-index:0}
+header{margin-top:70px;margin-bottom:56px;padding:22px 28px;border:1px solid rgba(232,238,245,.22);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.02)),rgba(11,43,58,.55);backdrop-filter:blur(6px);box-shadow:0 18px 40px -20px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.08);align-items:center}
+header::after{content:"";position:absolute;left:0;right:0;bottom:-46px;height:34px;background:%(divider)s center/640px 34px no-repeat;pointer-events:none}
+h1{font-family:Georgia,"Times New Roman",serif;font-weight:500;font-size:44px;letter-spacing:0;line-height:1.1}
+h1::before{content:"";display:inline-block;width:44px;height:44px;margin-right:14px;vertical-align:-8px;background:%(crescent)s center/contain no-repeat;filter:drop-shadow(0 0 10px rgba(232,182,76,.55))}
+.stats{gap:18px;margin-top:26px}
+.stat{display:flex;flex-direction:column;align-items:center;text-align:center;padding:22px 16px 20px;border:1px solid rgba(232,238,245,.28);border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.02)),rgba(15,53,71,.7);box-shadow:inset 0 0 0 4px rgba(11,43,58,.6),inset 0 0 0 5px rgba(232,238,245,.12),0 14px 34px -18px rgba(0,0,0,.7),0 0 26px -12px rgba(232,238,245,.35)}
+.stat::before{content:"";width:30px;height:30px;margin-bottom:8px;background:center/contain no-repeat}
+.stat[data-k="chars"]::before{background-image:%(i_moon)s}
+.stat[data-k="levels"]::before{background-image:%(i_up)s}
+.stat[data-k="gold"]::before{background-image:%(i_coin)s}
+.stat[data-k="change"]::before{background-image:%(i_spark)s}
+.stat:not([data-k])::before{display:none}
+.stat .l{order:1;text-transform:uppercase;letter-spacing:.05em;font-weight:600;font-size:12px;color:var(--text);margin:0 0 6px}
+.stat .v{order:2;font-family:Georgia,"Times New Roman",serif;font-size:40px;font-weight:500;line-height:1.1}
+.stat .l.s{order:3;text-transform:none;letter-spacing:0;font-weight:400;color:var(--text-dim);margin:6px 0 0}
+.stat .v .goldv{color:#f6cf74;text-shadow:0 0 18px rgba(240,194,90,.35)}
+.stat[data-k="change"] .v .goldv{color:#c8f0dc;text-shadow:0 0 16px rgba(166,236,201,.3)}
+.goal{margin-top:34px;background:transparent;border:none;box-shadow:none;padding:16px 4px 6px}
+.goal::before{content:"";display:block;height:34px;margin:-30px 0 14px;background:%(divider)s center/640px 34px no-repeat}
+.goal .gt{display:flex;align-items:center;gap:12px;font-family:Georgia,"Times New Roman",serif;font-size:30px;font-weight:500;letter-spacing:.04em;color:var(--text)}
+.goal .gt::before{content:"";width:32px;height:32px;background:%(crescent)s center/contain no-repeat;filter:drop-shadow(0 0 8px rgba(232,182,76,.55))}
+.goal .gv{font-size:17px}
+.goal .bar{height:22px;margin:16px 0 12px;border-radius:12px;padding:3px;background:rgba(5,25,35,.65);box-shadow:inset 0 0 0 1px rgba(232,238,245,.35),0 0 20px rgba(150,200,230,.18);overflow:visible}
+.goal .bar>i{position:relative;height:16px;border-radius:9px;overflow:hidden;background:linear-gradient(90deg,rgba(120,170,190,.55),rgba(210,226,236,.9) 70%%,#ffffff);box-shadow:0 0 14px rgba(232,238,245,.5)}
+.goal .bar>i::after{content:attr(data-pct);position:absolute;right:10px;top:50%%;transform:translateY(-50%%);font-size:11px;font-weight:700;color:#0b2b3a}
+.goal .bar>i::before{content:"";position:absolute;top:0;bottom:0;left:-40%%;width:40%%;background:linear-gradient(100deg,transparent,rgba(255,255,255,.75),transparent)}
+.tabs{gap:10px;border-bottom:none;margin:26px 0 18px;padding-bottom:0}
+.tab{flex:1;text-align:center;border:1px solid rgba(232,238,245,.2);border-radius:999px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.03));color:var(--text);padding:10px;margin:0}
+.tab:hover{border-color:rgba(232,238,245,.45)}
+.tab.on{color:#0b2b3a;background:linear-gradient(180deg,#f4f8fb,#c9d8e3);border-color:#ffffff;box-shadow:0 0 18px rgba(232,238,245,.45)}
+.card,.pick,.pcard,.ccard{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.01)),var(--surface);border-color:rgba(232,238,245,.2);border-radius:14px}
+th{background:rgba(255,255,255,.04)}
+tbody tr:hover>td{background:rgba(232,238,245,.06)}
+""",
+        "global": """
+[data-theme="moonlit-tide"][data-fx="on"] .goal .bar>i::before{animation:fl-shimmer 3.2s ease-in-out infinite}
+@keyframes fl-shimmer{0%{left:-40%}60%,100%{left:110%}}
+.fx-stars{display:none}
+[data-theme="moonlit-tide"] .fx-stars{display:block;position:fixed;inset:0;pointer-events:none;z-index:0}
+.fx-stars i{position:absolute;left:var(--x);top:var(--y);width:var(--s);height:var(--s);border-radius:50%;background:#ffffff;box-shadow:0 0 6px 1px rgba(232,238,245,.7);opacity:.55}
+[data-theme="moonlit-tide"][data-fx="on"] .fx-stars i{animation:fl-twinkle var(--d) ease-in-out var(--t) infinite}
+@keyframes fl-twinkle{0%,100%{opacity:.15;transform:scale(.7)}50%{opacity:.95;transform:scale(1.15)}}
+""",
+    },
+}
+THEMES["ember-forge"]["css"] = _fill(THEMES["ember-forge"]["css"], {
+    "i_person": _icon(_I_PERSON, "#ff7a2a"), "i_trend": _icon(_I_TREND, "#ff7a2a"),
+    "i_coin": _icon(_I_COIN, "#f2c24f"), "i_flame": _icon(_I_FLAME, "#ff7a2a"),
+    "flames1": _flames(11, 120, 28), "flames2": _flames(23, 84, 20)})
+THEMES["moonlit-tide"]["css"] = _fill(THEMES["moonlit-tide"]["css"], {
+    "i_moon": _icon(_I_MOON, "#e8eef5"), "i_up": _icon(_I_UP, "#e8eef5"),
+    "i_coin": _icon(_I_COIN, "#f0c25a"), "i_spark": _icon(_I_SPARK, "#e8eef5"),
+    "crescent": _CRESCENT, "divider": _DIVIDER})
+
+# Drifting embers and twinkling stars: pure CSS, transform/opacity only,
+# switchable in Settings, and off whenever Windows asks for reduced motion.
+_FX_CSS = """
+.fx-embers{display:none}
+[data-theme="ember-forge"][data-fx="on"] .fx-embers{display:block;position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:0}
+.fx-embers i{position:absolute;bottom:-14px;left:var(--x);width:var(--s);height:var(--h,var(--s));border-radius:50%;background:#ffb46a;box-shadow:0 0 7px 2px rgba(255,107,26,.65);opacity:0;animation:fl-ember var(--d) linear var(--t) infinite;will-change:transform,opacity}
+@keyframes fl-ember{0%{transform:translate(0,0) rotate(var(--r,0deg));opacity:0}10%{opacity:.95}70%{opacity:.5}100%{transform:translate(var(--w),-108vh) rotate(var(--r,0deg));opacity:0}}
+@media (prefers-reduced-motion:reduce){.fx-embers{display:none !important}.fx-stars i,.goal .bar>i,.goal .bar>i::before,.goal .bar>i::after{animation:none !important}}
+"""
+
+
+def theme_css():
+    """Every theme's variables and signature CSS, for a page's <style>."""
+    out = [":root{" + ";".join("--%s:%s" % kv for kv in _STEEL.items()) + "}"]
+    for tid, t in THEMES.items():
+        if tid == DEFAULT_THEME:
+            continue
+        out.append(':root[data-theme="%s"]{%s}' % (tid, ";".join("--%s:%s" % kv for kv in t["vars"].items())))
+        for line in t["css"].strip().splitlines():
+            # scope each rule (every selector in it) to its theme
+            sel, rest = line.strip().split("{", 1)
+            out.append(",".join('[data-theme="%s"] %s' % (tid, x.strip()) for x in sel.split(","))
+                       + "{" + rest)
+        if t.get("global"):
+            out.append(t["global"].strip())  # keyframes and effect layers, already scoped
+    out.append(_FX_CSS.strip())
+    return "\n".join(out)
+
+
+THEME_CSS = theme_css()
+
+
+def current_theme(settings=None):
+    """(theme id, "on"/"off" for animated effects) from the settings file."""
+    st = settings if settings is not None else load_settings()
+    tid = st.get("theme") if st.get("theme") in THEMES else DEFAULT_THEME
+    return tid, ("off" if st.get("theme_fx") is False else "on")
+
+
+def page_html():
+    tid, fx = current_theme()
+    return PAGE.replace("%%THEME_CSS%%", THEME_CSS).replace("%%THEME%%", tid).replace("%%FX%%", fx)
+
+
 # raw string so JS/CSS in the page can never be mangled by Python escapes
 PAGE = r"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html data-theme="%%THEME%%" data-fx="%%FX%%"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Forge's Ledger</title>
 <link rel="icon" href="/favicon.ico">
 <style>
-:root{--bg:#0e1015;--panel:#161920;--panel2:#1b1f27;--hover:#1e232c;--line:#252a35;--txt:#e6e8ee;--dim:#8b93a5;--faint:#596173;
---gold:#f5c542;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--accent:#7c93ff}
+%%THEME_CSS%%
 *{box-sizing:border-box}
-body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
 .wrap{max-width:1320px;margin:0 auto;padding:28px 20px 60px}
 header{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
 h1{margin:0;font-size:22px;font-weight:650;letter-spacing:-.01em}
-.sub{color:var(--dim);font-size:13px;margin-top:3px}
-.btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer;font:inherit;text-decoration:none;display:inline-block}
-.btn:hover{background:var(--hover)}.btn.primary{background:#3b5bfd;border-color:#3b5bfd;color:#fff}.btn.primary:hover{background:#4d6bff}
+.sub{color:var(--text-dim);font-size:13px;margin-top:3px}
+.btn{background:var(--surface-2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer;font:inherit;text-decoration:none;display:inline-block}
+.btn:hover{background:var(--hover)}.btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:var(--on-accent)}.btn.primary:hover{background:var(--accent-2-hover)}
 .btn:disabled{opacity:.5;cursor:default}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:22px 0 8px}
-.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .stat .v{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums}
-.stat .l{color:var(--dim);font-size:12px;margin-top:2px}
+.stat .l{color:var(--text-dim);font-size:12px;margin-top:2px}
+.stat .l.s{margin-top:0}
 .goldv{color:var(--gold)}
 .alert{padding:10px 14px;border-radius:10px;margin:12px 0;font-size:13px}
-.alert.err{background:#2a1517;border:1px solid #5c2328;color:#fecaca}
-.alert.ok{background:#11261b;border:1px solid #1f5136;color:#bbf7d0}
-.alert.info{background:var(--panel);border:1px solid var(--line);color:var(--dim)}
+.alert.err{background:var(--bad-bg);border:1px solid var(--bad-line);color:var(--bad-text)}
+.alert.ok{background:var(--good-bg);border:1px solid var(--good-line);color:var(--good-text)}
+.alert.info{background:var(--surface);border:1px solid var(--line);color:var(--text-dim)}
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:18px 0 16px}
-.tab{background:none;border:none;color:var(--dim);padding:10px 16px;font:inherit;font-weight:550;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
-.tab:hover{color:var(--txt)}.tab.on{color:var(--txt);border-bottom-color:var(--accent)}
+.tab{background:none;border:none;color:var(--text-dim);padding:10px 16px;font:inherit;font-weight:550;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--text)}.tab.on{color:var(--text);border-bottom-color:var(--accent)}
 .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-.controls .count{color:var(--dim);font-size:13px;margin-left:auto}
-input[type=search],select{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;outline:none}
+.controls .count{color:var(--text-dim);font-size:13px;margin-left:auto}
+input[type=search],select{background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;outline:none}
 input[type=search]:focus,select:focus{border-color:var(--accent)}
 input[type=search]{min-width:200px}
-label.chk{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:13px;cursor:pointer;user-select:none}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+label.chk{display:flex;align-items:center;gap:6px;color:var(--text-dim);font-size:13px;cursor:pointer;user-select:none}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .scroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse}
 th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
-th{color:var(--dim);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;background:var(--panel2);white-space:nowrap}
-th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--txt)}
+th{color:var(--text-dim);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;background:var(--surface-2);white-space:nowrap}
+th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--text)}
 th .arr{color:var(--accent)}
 tbody tr:last-child td{border-bottom:none}
 tbody tr:hover>td{background:var(--hover)}
@@ -1764,105 +2055,106 @@ tbody tr:hover>td{background:var(--hover)}
 .cn{font-weight:600}.star{color:var(--gold);font-size:12px}
 td:first-child{white-space:nowrap}
 .realm{color:var(--faint);font-size:12px}
-.faint{color:var(--faint)}.dim{color:var(--dim)}
+.faint{color:var(--faint)}.dim{color:var(--text-dim)}
 .lvl{display:flex;align-items:center;gap:8px;min-width:120px}
 .lvl b{font-variant-numeric:tabular-nums;width:22px;text-align:right}
-.bar{flex:1;height:6px;background:#262b36;border-radius:3px;overflow:hidden}
+.bar{flex:1;height:6px;background:var(--track);border-radius:3px;overflow:hidden}
 .bar>i{display:block;height:100%;background:var(--accent);border-radius:3px}
-.bar.cap>i{background:var(--green)}
-.pill{display:inline-flex;align-items:baseline;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:2px 9px;margin:2px 4px 2px 0;font-size:12px;white-space:nowrap}
+.bar.cap>i{background:var(--success)}
+.pill{display:inline-flex;align-items:baseline;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:20px;padding:2px 9px;margin:2px 4px 2px 0;font-size:12px;white-space:nowrap}
 .pill b{font-weight:600}.pill .exp{color:var(--faint);font-size:11px}
-.pill.maxed{border-color:#1f5136;background:#11261b}.pill.maxed b{color:var(--green)}
+.pill.maxed{border-color:var(--good-line);background:var(--good-bg)}.pill.maxed b{color:var(--success)}
 .rolesel{padding:4px 8px;font-size:12px;border-radius:20px}
 .role{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:20px;border:1px solid}
-.r-Main{color:#f5c542;border-color:#5a4a1a}.r-Farmer{color:#4ade80;border-color:#1f5136}.r-Crafter{color:#7cb8ff;border-color:#1f3d63}
-.r-Bank{color:#c4a7ff;border-color:#3d2e66}.r-Leveling{color:#fb923c;border-color:#5c3216}.r-Alt{color:#9aa3b5;border-color:#363c4a}
+.r-Main{color:var(--role-main);border-color:var(--role-main-line)}.r-Farmer{color:var(--role-farmer);border-color:var(--role-farmer-line)}.r-Crafter{color:var(--role-crafter);border-color:var(--role-crafter-line)}
+.r-Bank{color:var(--role-bank);border-color:var(--role-bank-line)}.r-Leveling{color:var(--role-leveling);border-color:var(--role-leveling-line)}.r-Alt{color:var(--role-alt);border-color:var(--role-alt-line)}
 select.rolesel.r-Main,select.rolesel.r-Farmer,select.rolesel.r-Crafter,select.rolesel.r-Bank,select.rolesel.r-Leveling,select.rolesel.r-Alt{border:1px solid}
 /* profession matrix */
 .matrix td.tc{text-align:center;min-width:84px;padding:7px 8px;cursor:default}
 .matrix td.tc.has{cursor:pointer}
-.matrix td.tc.sel{background:#232a3a !important;box-shadow:inset 0 0 0 1px var(--accent)}
+.matrix td.tc.sel{background:var(--sel) !important;box-shadow:inset 0 0 0 1px var(--accent)}
 .matrix th.tc{text-align:center}
 .sk{font-variant-numeric:tabular-nums;font-weight:600;font-size:13px}
 .sk span{color:var(--faint);font-weight:400}
-.mini{height:3px;background:#262b36;border-radius:2px;margin:4px auto 0;width:56px;overflow:hidden}
+.mini{height:3px;background:var(--track);border-radius:2px;margin:4px auto 0;width:56px;overflow:hidden}
 .mini>i{display:block;height:100%;background:var(--accent)}
-.tc.maxed .sk{color:var(--green)}.tc.maxed .mini>i{background:var(--green)}
+.tc.maxed .sk{color:var(--success)}.tc.maxed .mini>i{background:var(--success)}
 .rc{font-size:11px;color:var(--faint);margin-top:2px}
-.who{font-size:11px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;margin-inline:auto}
+.who{font-size:11px;color:var(--text-dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;margin-inline:auto}
 .matrix tr.prow{cursor:pointer}
-tr.detail>td{background:#12151b !important;padding:14px 18px}
+tr.detail>td{background:var(--detail) !important;padding:14px 18px}
 .dwrap{position:sticky;left:18px;width:min(1240px,calc(100vw - 80px))}
 .dhead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .dhead h3{margin:0;font-size:14px;font-weight:600}
 .recipes{display:flex;flex-wrap:wrap;gap:4px;max-height:280px;overflow:auto}
-.rec{font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+.rec{font-size:12px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
 .rec.miss{color:var(--faint);border-style:dashed}
-.sect{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:12px 0 6px}
+.sect{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin:12px 0 6px}
 .hint{color:var(--faint);font-size:12px;margin-top:8px}
 /* classes */
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.seg button{background:var(--panel);color:var(--dim);border:none;padding:7px 14px;font:inherit;cursor:pointer}
-.seg button.on{background:var(--panel2);color:var(--txt)}
-.summary{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 14px;font-size:13px;color:var(--dim)}
-.summary b{color:var(--txt);font-weight:600}
+.seg button{background:var(--surface);color:var(--text-dim);border:none;padding:7px 14px;font:inherit;cursor:pointer}
+.seg button.on{background:var(--surface-2);color:var(--text)}
+.summary{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 14px;font-size:13px;color:var(--text-dim)}
+.summary b{color:var(--text);font-weight:600}
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
-.ccard{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--cc);border-radius:12px;padding:14px 16px}
+.ccard{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--cc);border-radius:12px;padding:14px 16px}
 .ccard h3{margin:0;font-size:15px;color:var(--cc);display:flex;justify-content:space-between;align-items:center}
-.ccard .meta{color:var(--dim);font-size:12px;margin:2px 0 10px}
+.ccard .meta{color:var(--text-dim);font-size:12px;margin:2px 0 10px}
 .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px}
-.b-miss{background:#2a1517;color:var(--red)}.b-need{background:#2a2312;color:var(--amber)}.b-done{background:#11261b;color:var(--green)}
+.b-miss{background:var(--bad-bg);color:var(--danger)}.b-need{background:var(--warn-bg);color:var(--warn)}.b-done{background:var(--good-bg);color:var(--success)}
 .clist{list-style:none;margin:0;padding:0}
 .clist li{display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--line);font-size:13px}
 .clist li:first-child{border-top:none}
 .clist .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.clist .lv{font-variant-numeric:tabular-nums;color:var(--dim);width:24px;text-align:right}
-.clist .lv.cap{color:var(--green);font-weight:600}
+.clist .lv{font-variant-numeric:tabular-nums;color:var(--text-dim);width:24px;text-align:right}
+.clist .lv.cap{color:var(--success);font-weight:600}
 .more{background:none;border:none;color:var(--accent);font:inherit;font-size:12px;cursor:pointer;padding:6px 0 0}
 .empty{color:var(--faint);font-size:13px;padding:6px 0}
 .note{color:var(--faint);font-size:12px;margin-top:20px;line-height:1.6}
 .trk{background:none;border:none;padding:0 2px;font-size:13px;cursor:pointer;color:var(--faint);line-height:1}
 .trk.on{color:var(--gold)}.trk:hover{color:var(--gold)}
-input[type=number],input[type=date]{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;outline:none;color-scheme:dark}
+input[type=number],input[type=date]{background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;outline:none;color-scheme:dark}
 input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
-.goal{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0 4px}
+.goal{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0 4px}
 .goal .gh{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
-.goal .gt{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.goal .gt{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim)}
 .goal .gv{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:4px}
-.goal .gv span{color:var(--dim);font-size:15px;font-weight:500}
+.goal .gv span{color:var(--text-dim);font-size:15px;font-weight:500}
 .goal .bar{height:10px;margin:12px 0 10px;border-radius:5px}
 .goal .bar>i{background:var(--gold);border-radius:5px}
-.goal .gd{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:13px;color:var(--dim)}
-.goal .gd b{color:var(--txt);font-weight:600}
+.goal .gd{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:13px;color:var(--text-dim)}
+.goal .gd b{color:var(--text);font-weight:600}
 .goal form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:12px}
-.goal label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim)}
-.good{color:var(--green) !important}.warn{color:var(--amber) !important}
-.mg{color:var(--gold)}.ms{color:#c9ccd6}.mc{color:#d4894b}
+.goal label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--text-dim)}
+.good{color:var(--success) !important}.warn{color:var(--warn) !important}
+.mg{color:var(--gold)}.ms{color:var(--silver)}.mc{color:var(--copper)}
 #gamesw{vertical-align:middle;margin-right:6px}
 #gamesw button{padding:8px 14px}
 .picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px}
-.pick{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.pick:first-child{border-color:#3b4a8a;background:#171c2b}
-.pick .pk{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.pick{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.pick:first-child{border-color:var(--pick-line);background:var(--pick-bg)}
+.pick .pk{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim)}
 .pick .pn{font-size:17px;margin-top:4px}.pick .pv{margin-top:8px;font-size:14px}.pick .pv b{font-size:20px}
 .pick .pr{margin-top:6px;font-size:12px;min-height:18px}
 .psum{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:14px}
-.pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px}
+.pcard{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px}
 .pcard .pt{font-weight:600}.pcard .pv2{margin-top:2px}
-input.wk{width:18px;height:18px;accent-color:var(--green);cursor:pointer}
+input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
 .names{columns:4 220px;column-gap:24px;font-size:13px;padding:14px 18px}
 .names div{padding:3px 0;break-inside:avoid;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.names div.miss{color:var(--dim)}
+.names div.miss{color:var(--text-dim)}
+/* item quality colours are the game's own, not theme */
 .q-Poor{color:#9d9d9d}.q-Common{color:#e6e8ee}.q-Uncommon{color:#1eff00}.q-Rare{color:#3d8bfd}
 .catrow{display:grid;grid-template-columns:minmax(120px,200px) 1fr 90px;gap:12px;align-items:center;padding:8px 16px;border-top:1px solid var(--line);font-size:13px}
 .catrow:first-child{border-top:none}
 .catrow .bar{height:8px}
-.panel-h{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin:20px 0 8px}
+.panel-h{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin:20px 0 8px}
 .two{display:grid;grid-template-columns:3fr 2fr;gap:16px}
 @media(max-width:900px){.two{grid-template-columns:1fr}}
 [hidden]{display:none !important}
 @media(max-width:700px){.wrap{padding:18px 16px 40px}th,td{padding:7px 8px}input[type=search]{min-width:0;flex:1}.controls .count{margin-left:0}}
-</style></head><body><div class="wrap">
+</style></head><body><div class="fx-embers" aria-hidden="true"><i style="--x:20%;--s:2px;--h:15px;--r:-17deg;--d:10s;--t:-17s;--w:-21px"></i><i style="--x:8%;--s:4px;--d:17s;--t:-6s;--w:-12px"></i><i style="--x:54%;--s:3px;--d:10s;--t:-7s;--w:-27px"></i><i style="--x:8%;--s:3px;--d:18s;--t:-3s;--w:-30px"></i><i style="--x:8%;--s:2px;--h:15px;--r:-17deg;--d:12s;--t:-1s;--w:-19px"></i><i style="--x:19%;--s:3px;--d:17s;--t:-3s;--w:27px"></i><i style="--x:14%;--s:2px;--d:18s;--t:-18s;--w:-21px"></i><i style="--x:71%;--s:2px;--d:20s;--t:-2s;--w:-29px"></i><i style="--x:64%;--s:2px;--h:15px;--r:0deg;--d:16s;--t:-18s;--w:21px"></i><i style="--x:32%;--s:3px;--d:11s;--t:-7s;--w:-28px"></i><i style="--x:68%;--s:3px;--d:16s;--t:-10s;--w:19px"></i><i style="--x:10%;--s:4px;--d:10s;--t:-16s;--w:15px"></i><i style="--x:20%;--s:2px;--h:16px;--r:6deg;--d:9s;--t:-2s;--w:20px"></i><i style="--x:77%;--s:3px;--d:16s;--t:-18s;--w:12px"></i><i style="--x:35%;--s:2px;--d:16s;--t:-2s;--w:-33px"></i><i style="--x:83%;--s:3px;--d:18s;--t:-14s;--w:32px"></i><i style="--x:86%;--s:2px;--h:14px;--r:-19deg;--d:16s;--t:-11s;--w:-29px"></i><i style="--x:64%;--s:2px;--d:9s;--t:-6s;--w:14px"></i><i style="--x:51%;--s:2px;--d:15s;--t:-15s;--w:-15px"></i><i style="--x:52%;--s:3px;--d:17s;--t:-8s;--w:-36px"></i><i style="--x:71%;--s:2px;--h:13px;--r:6deg;--d:14s;--t:-12s;--w:-14px"></i><i style="--x:23%;--s:2px;--d:11s;--t:-7s;--w:-10px"></i><i style="--x:76%;--s:3px;--d:11s;--t:-8s;--w:10px"></i><i style="--x:54%;--s:2px;--d:17s;--t:-11s;--w:40px"></i><i style="--x:89%;--s:2px;--h:9px;--r:9deg;--d:19s;--t:-17s;--w:22px"></i><i style="--x:51%;--s:3px;--d:10s;--t:-15s;--w:11px"></i><i style="--x:9%;--s:2px;--d:12s;--t:-14s;--w:-13px"></i><i style="--x:77%;--s:3px;--d:9s;--t:-3s;--w:-28px"></i></div><div class="fx-stars" aria-hidden="true"><i style="--x:20%;--y:69%;--s:1px;--d:5s;--t:-4s"></i><i style="--x:4%;--y:10%;--s:1px;--d:7s;--t:-3s"></i><i style="--x:20%;--y:82%;--s:2px;--d:5s;--t:-4s"></i><i style="--x:47%;--y:61%;--s:1px;--d:3s;--t:-6s"></i><i style="--x:63%;--y:60%;--s:2px;--d:6s;--t:-2s"></i><i style="--x:11%;--y:19%;--s:1px;--d:5s;--t:-5s"></i><i style="--x:34%;--y:62%;--s:1px;--d:7s;--t:-0s"></i><i style="--x:27%;--y:68%;--s:2px;--d:4s;--t:-5s"></i><i style="--x:70%;--y:4%;--s:3px;--d:5s;--t:-5s"></i><i style="--x:12%;--y:90%;--s:2px;--d:7s;--t:-2s"></i><i style="--x:22%;--y:46%;--s:1px;--d:7s;--t:-4s"></i><i style="--x:65%;--y:43%;--s:1px;--d:7s;--t:-6s"></i><i style="--x:98%;--y:25%;--s:1px;--d:6s;--t:-5s"></i><i style="--x:30%;--y:26%;--s:3px;--d:6s;--t:-2s"></i><i style="--x:94%;--y:4%;--s:1px;--d:5s;--t:-3s"></i><i style="--x:34%;--y:25%;--s:3px;--d:5s;--t:-3s"></i><i style="--x:93%;--y:45%;--s:2px;--d:3s;--t:-1s"></i><i style="--x:14%;--y:30%;--s:2px;--d:4s;--t:-2s"></i><i style="--x:27%;--y:62%;--s:3px;--d:7s;--t:-6s"></i><i style="--x:1%;--y:62%;--s:2px;--d:3s;--t:-6s"></i><i style="--x:85%;--y:16%;--s:2px;--d:4s;--t:-3s"></i><i style="--x:23%;--y:56%;--s:2px;--d:3s;--t:-6s"></i><i style="--x:93%;--y:51%;--s:2px;--d:6s;--t:-5s"></i><i style="--x:11%;--y:93%;--s:1px;--d:4s;--t:-1s"></i><i style="--x:4%;--y:20%;--s:3px;--d:6s;--t:-6s"></i><i style="--x:84%;--y:19%;--s:3px;--d:7s;--t:-3s"></i><i style="--x:85%;--y:45%;--s:1px;--d:7s;--t:-4s"></i><i style="--x:17%;--y:3%;--s:1px;--d:3s;--t:-4s"></i><i style="--x:96%;--y:18%;--s:2px;--d:4s;--t:-6s"></i><i style="--x:28%;--y:4%;--s:2px;--d:4s;--t:-2s"></i><i style="--x:65%;--y:31%;--s:3px;--d:5s;--t:-2s"></i><i style="--x:70%;--y:54%;--s:1px;--d:3s;--t:-5s"></i><i style="--x:46%;--y:59%;--s:3px;--d:7s;--t:-3s"></i><i style="--x:65%;--y:17%;--s:3px;--d:4s;--t:-4s"></i><i style="--x:66%;--y:3%;--s:2px;--d:4s;--t:-4s"></i><i style="--x:1%;--y:20%;--s:1px;--d:4s;--t:-3s"></i></div><div class="wrap">
 
 <header>
   <div><h1>Forge&#39;s Ledger</h1><div class="sub" id="syncinfo">Loading…</div></div>
@@ -2013,7 +2305,7 @@ function money(copper){
   return parts.join(" ");
 }
 function signedMoney(copper){return copper>0?"+"+money(copper):copper<0?"−"+money(-copper):"—"}
-function cc(cls){return CLASS_COLORS[cls]||"var(--txt)"}
+function cc(cls){return CLASS_COLORS[cls]||"var(--text)"}
 function roleChip(r){return r?'<span class="role r-'+esc(r)+'">'+esc(r)+"</span>":""}
 function nameHtml(c){return '<span class="cn" style="color:'+cc(c.class)+'">'+esc(c.name)+'</span> <button class="trk'+(c.tracked?" on":"")+'" data-track="'+esc(c.key)+'" title="'+(c.tracked?"Tracked — click to stop tracking":"Click to track this character")+'">'+(c.tracked?"★":"☆")+"</button>"}
 // latest expansion tier the character has actually put points into
@@ -2055,9 +2347,9 @@ function header(){
     if(!D.characters.length)fa+='<div class="alert info">No Forever characters yet. Install the addon in your Forever client (<a href="/setup" style="color:inherit">Settings</a> → Update addon), log into a character, then type <b>/fl sync</b>. Blizzard doesn&#39;t offer Forever character data yet, so everything here comes from the addon.</div>';
     $("alert").innerHTML=fa;
     const t=D.totals;renderGoal();
-    $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
-        :stat("—","tracked characters — click ☆ next to a name to track it")+stat("—","levels to go"))+
-      stat('<span class="goldv">'+money(t.gold_total)+"</span>","total gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days");
+    $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP,"chars")+stat(t.levels_remaining.toLocaleString(),"levels to go","levels")
+        :stat("—","tracked characters — click ☆ next to a name to track it","chars")+stat("—","levels to go","levels"))+
+      stat('<span class="goldv">'+money(t.gold_total)+"</span>","total gold","gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days","change");
     return;
   }
   if(D.synced_at){const m=Math.round((Date.now()/1000-D.synced_at)/60);
@@ -2081,16 +2373,22 @@ function header(){
   $("syncbtn").disabled=!!D.syncing;$("syncbtn").textContent=D.syncing?"Syncing…":"Sync now";
   const t=D.totals;
   renderGoal();
-  $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP)+stat(t.levels_remaining.toLocaleString(),"levels to go")
-      :stat("—","tracked characters — click ☆ next to a name to track it")+stat("—","levels to go"))+
-    stat('<span class="goldv">'+money(t.gold_total)+"</span>",bankLine(t))+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days");
+  $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP,"chars")+stat(t.levels_remaining.toLocaleString(),"levels to go","levels")
+      :stat("—","tracked characters — click ☆ next to a name to track it","chars")+stat("—","levels to go","levels"))+
+    stat('<span class="goldv">'+money(t.gold_total)+"</span>",bankLine(t),"gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days","change");
 }
 function bankLine(t){
   const b=D.warband_bank;
   if(!b)return 'total gold<br><span class="faint">warband bank: open a bank in game to record it</span>';
   return 'total gold<br><span class="faint">'+esc(t.characters_gold_fmt)+" on characters · "+esc(b.fmt)+" in warband bank</span>";
 }
-function stat(v,l){return '<div class="stat"><div class="v">'+v+'</div><div class="l">'+l+"</div></div>"}
+// k names the stat (themes give each an icon); a "<br>" in the label
+// starts its grey second line, which themes can place under the number
+function stat(v,l,k){
+  const p=String(l).split("<br>");
+  return '<div class="stat"'+(k?' data-k="'+k+'"':"")+'><div class="v">'+v+'</div><div class="l">'+p[0]+"</div>"+
+    (p.length>1?'<div class="l s">'+p.slice(1).join("<br>")+"</div>":"")+"</div>";
+}
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
@@ -2140,7 +2438,7 @@ function renderRoster(){
       '<td><select class="rolesel'+(c.role?" r-"+esc(c.role):"")+'" data-key="'+esc(c.key)+'">'+roleOpts(c.role)+"</select></td>"+
       "<td>"+profPills(c)+"</td>"+
       '<td class="num goldv">'+(c.gold?money(c.gold):'<span class="faint">—</span>')+"</td>"+
-      '<td class="num">'+(chg>0?'<span style="color:var(--green)">+'+money(chg)+"</span>":chg<0?'<span style="color:var(--red)">−'+money(-chg)+"</span>":'<span class="faint">—</span>')+"</td></tr>";
+      '<td class="num">'+(chg>0?'<span style="color:var(--success)">+'+money(chg)+"</span>":chg<0?'<span style="color:var(--danger)">−'+money(-chg)+"</span>":'<span class="faint">—</span>')+"</td></tr>";
   }).join("")||'<tr><td colspan="8" class="empty">No characters match these filters.</td></tr>';
   $("rcount").textContent=rows.length+" of "+D.characters.length+" characters";
 }
@@ -2315,7 +2613,7 @@ async function renderCollections(){
           const bq=s.list.reduce((a,p)=>((QO[p.quality]??-1)>(QO[a]??-1)?p.quality:a),"");
           const nicks=s.list.map(p=>p.nick).filter(Boolean);
           return "<tr><td>"+(s.list.some(p=>p.fav)?'<span class="star">★</span> ':"")+esc(s.name)+'</td><td class="num">'+s.list.length+
-            '</td><td class="num"'+(bl>=25?' style="color:var(--green)"':"")+">"+bl+'</td><td class="q-'+esc(bq)+'">'+esc(bq)+'</td><td class="dim">'+esc(nicks.join(", "))+"</td></tr>";
+            '</td><td class="num"'+(bl>=25?' style="color:var(--success)"':"")+">"+bl+'</td><td class="q-'+esc(bq)+'">'+esc(bq)+'</td><td class="dim">'+esc(nicks.join(", "))+"</td></tr>";
         }).join("")||'<tr><td colspan="5" class="empty">Nothing matches.</td></tr>')+
         "</tbody></table></div>";
     }else{
@@ -2408,7 +2706,7 @@ function renderGoal(){
   el.innerHTML='<div class="goal"><div class="gh"><div><div class="gt">Gold goal</div>'+
     '<div class="gv"><span class="goldv">'+money(g.current)+"</span> <span>of "+money(g.amount*10000)+" · "+g.pct.toFixed(g.pct<10?1:0)+"%</span></div></div>"+
     '<button class="btn" data-goal="edit">Edit</button></div>'+
-    '<div class="bar"><i style="width:'+Math.min(100,g.pct)+'%"></i></div><div class="gd">'+bits.map(b=>"<span>"+b+"</span>").join("")+"</div>"+
+    '<div class="bar"><i style="width:'+Math.min(100,g.pct)+'%" data-pct="'+g.pct.toFixed(0)+'%"></i></div><div class="gd">'+bits.map(b=>"<span>"+b+"</span>").join("")+"</div>"+
     '<div class="hint">Counts gold on characters the addon has recorded'+(D.game==="forever"?"":", plus your warband bank")+'. Log into an alt once to include it.</div></div>';
 }
 async function goalAction(a){
@@ -2685,46 +2983,62 @@ async function poll(){
 }
 function agoShort(ts){const m=Math.round((Date.now()/1000-ts)/60);return m<1?"just now":m<120?m+" min ago":Math.round(m/60)+" h ago"}
 render();load();poll();
+// a theme picked in Settings (in another tab) repaints this page at once
+if("BroadcastChannel" in window){
+  new BroadcastChannel("forges-ledger-theme").onmessage=e=>{
+    const d=e.data||{};if(!d.theme)return;
+    document.documentElement.dataset.theme=d.theme;document.documentElement.dataset.fx=d.fx?"on":"off";
+  };
+}
 </script></body></html>
 """
 
 # raw string so the page's backslashes (Windows paths) survive as written
-SETUP_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+SETUP_TEMPLATE = r"""<!DOCTYPE html><html data-theme="%%THEME%%" data-fx="%%FX%%"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Setup - Forge's Ledger</title><link rel="icon" href="/favicon.ico"><style>
-:root{--bg:#0e1015;--panel:#161920;--panel2:#1b1f27;--line:#252a35;--txt:#e6e8ee;--dim:#8b93a5;--faint:#596173;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--accent:#7c93ff}
+%%THEME_CSS%%
 *{box-sizing:border-box}
-body{background:var(--bg);color:var(--txt);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
 .wrap{max-width:720px;margin:0 auto;padding:32px 20px 60px}
 h1{margin:0;font-size:24px;font-weight:650}
-.sub{color:var(--dim);margin:4px 0 22px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:14px}
+.sub{color:var(--text-dim);margin:4px 0 22px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:14px}
 .card h2{margin:0 0 4px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:10px}
-.card h2 .n{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);font-size:12px;color:var(--dim)}
-.card .why{color:var(--dim);font-size:13px;margin:0 0 12px}
-label{display:block;margin:12px 0 5px;color:var(--dim);font-size:13px}
-input,select{width:100%;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--txt);font:inherit;outline:none}
+.card h2 .n{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--surface-2);border:1px solid var(--line);font-size:12px;color:var(--text-dim)}
+.card .why{color:var(--text-dim);font-size:13px;margin:0 0 12px}
+label{display:block;margin:12px 0 5px;color:var(--text-dim);font-size:13px}
+input,select{width:100%;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit;outline:none}
 input:focus,select:focus{border-color:var(--accent)}
 ol{margin:8px 0 0;padding-left:22px}ol li{margin:8px 0}
-code{background:var(--bg);border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-size:13px;color:var(--txt)}
-.copy{background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;font:inherit;font-size:12px;padding:2px 8px;margin-left:6px;cursor:pointer}
-.copy:hover{color:var(--txt)}
+code{background:var(--bg);border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-size:13px;color:var(--text)}
+.copy{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--line);border-radius:6px;font:inherit;font-size:12px;padding:2px 8px;margin-left:6px;cursor:pointer}
+.copy:hover{color:var(--text)}
 a{color:var(--accent)}
-.btn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
-.btn.primary{background:#3b5bfd;border-color:#3b5bfd;color:#fff;font-weight:600;padding:12px 20px}
-.btn.primary:hover{background:#4d6bff}
+.btn{background:var(--surface-2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+.btn.primary{background:var(--accent-2);border-color:var(--accent-2);color:var(--on-accent);font-weight:600;padding:12px 20px}
+.btn.primary:hover{background:var(--accent-2-hover)}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}
 .status{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:10px}
-.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
+.ok{color:var(--success)}.bad{color:var(--danger)}.warn{color:var(--warn)}
 .alert{padding:11px 14px;border-radius:10px;margin:0 0 16px;font-size:13px}
-.alert.err{background:#2a1517;border:1px solid #5c2328;color:#fecaca}
-.alert.good{background:#11261b;border:1px solid #1f5136;color:#bbf7d0}
+.alert.err{background:var(--bad-bg);border:1px solid var(--bad-line);color:var(--bad-text)}
+.alert.good{background:var(--good-bg);border:1px solid var(--good-line);color:var(--good-text)}
 .hint{color:var(--faint);font-size:12px;margin-top:6px}
 details summary{cursor:pointer;color:var(--accent);font-size:13px;margin-top:4px}
 .note{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.6}
-label.acct{display:flex;align-items:baseline;gap:8px;margin:8px 0;color:var(--txt);font-size:14px;cursor:pointer}
+label.acct{display:flex;align-items:baseline;gap:8px;margin:8px 0;color:var(--text);font-size:14px;cursor:pointer}
 label.acct input{width:auto;accent-color:var(--accent)}
 .datapath{font-size:12px;word-break:break-all}
-a.btn{text-decoration:none;color:var(--txt)}
+a.btn{text-decoration:none;color:var(--text)}
+.themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:6px}
+.theme{display:flex;flex-direction:column;gap:6px;text-align:left;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit;cursor:pointer}
+.theme:hover{border-color:var(--text-dim)}
+.theme.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.theme .sw{display:flex;gap:4px}.theme .sw i{width:22px;height:22px;border-radius:6px;border:1px solid rgba(255,255,255,.12)}
+.theme b{font-weight:600}.theme small{color:var(--text-dim);font-size:12px}
+.fam{color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin:12px 0 2px}
+label.fx{display:flex;align-items:center;gap:8px;margin:14px 0 0;color:var(--text);font-size:14px;cursor:pointer}
+label.fx input{width:auto;accent-color:var(--accent)}
 </style></head><body><div class="wrap">
 <h1>%%TITLE%%</h1>
 <div class="sub">%%SUBTITLE%%</div>
@@ -2782,6 +3096,8 @@ a.btn{text-decoration:none;color:var(--txt)}
 
 %%DATA%%
 
+%%APPEARANCE%%
+
 <div class="note">Everything stays on this computer: there are no servers, no analytics and no tracking. Read the <a href="/privacy" target="_blank">privacy policy</a>.<br>
 Character and game data provided by Blizzard Entertainment. This app is not endorsed by, affiliated with, or connected to Blizzard Entertainment.
 World of Warcraft and Blizzard Entertainment are trademarks of Blizzard Entertainment, Inc.</div>
@@ -2830,6 +3146,28 @@ document.addEventListener("click",async e=>{
   }
   if(e.target.id!=="open-folder")return;
   try{await fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})}catch(err){}
+});
+// Appearance: repaint now, save, and tell any open dashboard tab
+const themeCh=("BroadcastChannel" in window)?new BroadcastChannel("forges-ledger-theme"):null;
+async function setTheme(theme,fx){
+  const root=document.documentElement;
+  root.dataset.theme=theme;root.dataset.fx=fx?"on":"off";
+  document.querySelectorAll(".theme").forEach(b=>b.classList.toggle("on",b.dataset.theme===theme));
+  if(themeCh)themeCh.postMessage({theme,fx});
+  const st=document.getElementById("theme-status");
+  try{
+    const r=await fetch("/api/theme",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({theme,fx})});
+    if(!r.ok)throw new Error();
+    if(st)st.textContent="Saved.";
+  }catch(err){if(st)st.textContent="Couldn't save - try again."}
+}
+document.addEventListener("click",e=>{
+  const b=e.target.closest(".theme");if(!b)return;
+  setTheme(b.dataset.theme,document.getElementById("theme-fx").checked);
+});
+document.addEventListener("change",e=>{
+  if(e.target.id!=="theme-fx")return;
+  setTheme(document.documentElement.dataset.theme,e.target.checked);
 });
 async function installAddon(btn){
   btn.disabled=true;btn.textContent="Installing…";
@@ -2955,21 +3293,49 @@ def render_setup(error=None, notice=None, form=None):
         "%%BACK_LINK%%": ('<a href="/">Back to dashboard</a>' if configured else ""),
         "%%ACCOUNTS%%": accounts_card() if configured else "",
         "%%DATA%%": data_card() if configured else "",
+        "%%APPEARANCE%%": appearance_card(),
+        "%%THEME_CSS%%": THEME_CSS,
+        "%%THEME%%": current_theme()[0],
+        "%%FX%%": current_theme()[1],
     }.items():
         page = page.replace(k, v)
     return page
+
+
+def appearance_card():
+    """Settings card: the dashboard theme. Clicking one repaints at once."""
+    esc = html.escape
+    tid, fx = current_theme()
+    out = ['<div class="card"><h2><span class="n">8</span>Appearance</h2>'
+           '<p class="why">How the dashboard looks. Only the look changes - your data and '
+           'the in-game addon stay exactly the same.</p>']
+    for fam in ("Forge", "Luna"):
+        out.append('<div class="fam">%s</div><div class="themes">' % fam)
+        for key, t in THEMES.items():
+            if t["family"] != fam:
+                continue
+            sw = "".join('<i style="background:%s"></i>' % esc(c) for c in t["swatches"])
+            out.append('<button type="button" class="theme%s" data-theme="%s"><span class="sw">%s</span>'
+                       '<b>%s</b><small>%s</small></button>'
+                       % (" on" if key == tid else "", esc(key), sw, esc(t["name"]), esc(t["blurb"])))
+        out.append('</div>')
+    out.append('<label class="fx"><input type="checkbox" id="theme-fx"%s> Animated effects '
+               '<span class="hint" style="margin:0">(Ember Forge\'s drifting sparks - always off '
+               'if Windows is set to reduce animations)</span></label>'
+               '<div class="hint" id="theme-status"></div></div>' % (" checked" if fx == "on" else ""))
+    return "".join(out)
 
 
 def data_card():
     """Settings card: back up / restore your choices, and see where data lives."""
     return ('<div class="card"><h2><span class="n">7</span>Your data</h2>'
             '<p class="why">Back up your choices, or bring them to another PC: tracked '
-            'characters, roles, gold goals, WoW account picks and this week\'s Todo ticks. '
+            'characters, roles, gold goals, WoW account picks, this week\'s Todo ticks and your theme. '
             'Your Blizzard login and cached character data are never included - on a new '
             'PC you set up your Blizzard key once and the rest syncs in about a minute.</p>'
             '<div class="row" style="margin-top:4px">'
             '<a class="btn" href="/api/export" download>Export settings</a>'
-            '<label class="btn" style="margin:0;display:inline-block;color:var(--txt);font-size:14px">'
+            '<label class="btn" style="margin:0;display:inline-block;color:var(--text);font-size:14px">'
             'Import settings<input type="file" id="import-file" accept=".json,application/json" hidden></label>'
             '<button class="btn" type="button" id="open-folder">Open data folder</button></div>'
             '<div class="hint" id="data-status">Importing replaces those choices; your current ones '
@@ -2981,7 +3347,7 @@ def data_card():
 def export_settings():
     """The portable part of your data: choices only, no login, no Blizzard data."""
     st = load_settings()
-    keep = ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo")
+    keep = ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx")
     return {"app": "ForgesLedger", "format": 1, "appVersion": APP_VERSION,
             "exportedAt": int(time.time()),
             "settings": {k: st[k] for k in keep if k in st},
@@ -3022,10 +3388,14 @@ def import_settings(doc):
         return "The settings file has an invalid account list."
     if "todo" in st and not isinstance(st["todo"], dict):
         return "The settings file has invalid Todo data."
+    if "theme" in st and st["theme"] not in THEMES:
+        st = {k: v for k, v in st.items() if k not in ("theme", "theme_fx")}  # a theme this version lacks: keep the current one
+    if "theme_fx" in st and not isinstance(st["theme_fx"], bool):
+        return "The settings file has an invalid effects setting."
     with open(os.path.join(BASE_DIR, "settings-before-import.json"), "w", encoding="utf-8") as f:
         json.dump(export_settings(), f, indent=2)
     current = load_settings()
-    for k in ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo"):
+    for k in ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx"):
         if k in st:
             current[k] = st[k]
     save_settings(current)
@@ -3516,7 +3886,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not has_credentials():
                 self.send_html(render_setup())
             else:
-                self.send_html(PAGE)
+                self.send_html(page_html())
             return
 
         if path == "/setup":
@@ -3539,6 +3909,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "max-age=86400")
             self.end_headers()
             self.wfile.write(icon)
+            return
+
+        if path == "/anvil.png":
+            # the app icon's anvil on a transparent background, for themes
+            # (made from forges-ledger.ico; shipped inside the .exe)
+            try:
+                with open(os.path.join(RESOURCE_DIR, "forges-ledger-anvil.png"), "rb") as f:
+                    art = f.read()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(art)))
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(art)
             return
 
         if path == "/privacy":
@@ -3764,6 +4152,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 keys.discard(str(req["key"]))
             s["tracked"] = sorted(keys)
+            save_settings(s)
+            self.send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/theme":
+            # the dashboard look - a user setting, not game data
+            req = read_json_body(self, body)
+            if req is None or req.get("theme") not in THEMES:
+                self.send_json({"error": "unknown theme"}, 400)
+                return
+            s = load_settings()
+            s["theme"] = req["theme"]
+            if "fx" in req:
+                s["theme_fx"] = bool(req["fx"])
             save_settings(s)
             self.send_json({"ok": True})
             return
