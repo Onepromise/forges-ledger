@@ -1672,6 +1672,10 @@ def todo_auto(c, facts):
     if not facts or facts.get("at", 0) < week_start:
         return out  # nothing read since the weekly reset
     vault = facts.get("vault")
+    if isinstance(vault, dict):
+        # "Concession" is the vault's "Or collect" reward, taken INSTEAD of a
+        # slot - not a slot to earn, so it isn't counted
+        vault = {n: r for n, r in vault.items() if n != "Concession"}
     if isinstance(vault, dict) and vault:
         unlocked = sum(r.get("unlocked", 0) for r in vault.values() if isinstance(r, dict))
         total = sum(r.get("total", 0) for r in vault.values() if isinstance(r, dict))

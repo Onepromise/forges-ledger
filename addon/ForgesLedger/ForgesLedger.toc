@@ -1,7 +1,9 @@
 ## Interface: 120000, 120100, 120105, 16001
 ## Title: Forge's Ledger
-## Notes: Records each character's gold and your warband bank gold for the Forge's Ledger app on this PC. Click the Sync button, use the keybind, or type /fl sync to update the app immediately.
+## Notes: Records each character's gold and your warband bank gold for the Forge's Ledger app on this PC, with an at-a-glance bar for gold, Todo and the Great Vault. Click the Sync button, use the keybind, or type /fl sync to update the app immediately. /fl help for commands.
 ## Author: Forge
-## Version: 2.4
+## Version: 2.5
 ## SavedVariables: ForgeGoldDB
 ForgesLedger.lua
+ForgesLedger_Windows.lua
+ForgesLedger_Bar.lua

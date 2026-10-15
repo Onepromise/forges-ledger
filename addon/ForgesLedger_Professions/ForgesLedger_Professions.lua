@@ -1,4 +1,4 @@
--- Forge's Ledger: Professions v1.4 (retail)
+-- Forge's Ledger: Professions v1.5 (retail)
 -- A companion to Forge's Ledger, and useful on its own: shows your skill in
 -- every expansion's tier of a profession, right beside the profession
 -- window. It also records those numbers for the Forge's Ledger app.
@@ -16,7 +16,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.4"
+local VERSION = "1.5"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -283,6 +283,90 @@ frame:SetScript("OnEvent", function(_, event)
         QueueScan()
     end
 end)
+
+---------------------------------------------------------------- the bar ---
+-- With the core addon v2.5+ installed, this adds the "Professions" segment
+-- to its bar: how many profession cooldowns are ready, across every
+-- character the core addon has seen. The cooldowns themselves are recorded
+-- by the core (they stay there so they work without this addon); this only
+-- reads them. With no core, or an older one, this block does nothing.
+
+local function Cooldowns()
+    local ready, waiting, now = {}, {}, time()
+    local chars = type(ForgeGoldDB) == "table" and ForgeGoldDB.chars  -- the core's save data
+    if type(chars) ~= "table" then return ready, waiting end
+    for key, ch in pairs(chars) do
+        if type(ch) == "table" and type(ch.cooldowns) == "table" then
+            for _, cd in pairs(ch.cooldowns) do
+                if type(cd) == "table" and type(cd.readyAt) == "number" then
+                    tinsert(cd.readyAt <= now and ready or waiting,
+                            { who = ch.name or key, name = cd.name or "?", readyAt = cd.readyAt })
+                end
+            end
+        end
+    end
+    table.sort(ready, function(a, b) return a.who < b.who end)
+    table.sort(waiting, function(a, b) return a.readyAt < b.readyAt end)
+    return ready, waiting
+end
+
+local function BarWindowLines()
+    local ready, waiting = Cooldowns()
+    local now = time()
+    local lines = { { text = "Cooldowns ready", header = true } }
+    for _, e in ipairs(ready) do
+        tinsert(lines, { text = e.name, right = e.who, indent = true })
+    end
+    if #ready == 0 then tinsert(lines, { text = "None ready right now", dim = true, indent = true }) end
+    if #waiting > 0 then
+        tinsert(lines, { text = "On cooldown", header = true })
+        for _, e in ipairs(waiting) do
+            tinsert(lines, { text = e.name .. " - " .. e.who, right = SecondsToTime(e.readyAt - now, true),
+                             indent = true })
+        end
+    end
+    if #ready + #waiting == 0 then
+        tinsert(lines, { text = "A cooldown shows up after you use it once - the game", dim = true })
+        tinsert(lines, { text = "only reports one while it's running.", dim = true })
+    end
+    -- this character's skills, from this addon's own scans
+    tinsert(lines, { text = "This character", header = true })
+    local profs, names = CharData().data.professions, {}
+    for prof in pairs(profs) do tinsert(names, prof) end
+    table.sort(names)
+    for _, prof in ipairs(names) do
+        local p = profs[prof]
+        tinsert(lines, { text = prof, right = (p.skill or 0) .. " / " .. (p.maxSkill or 0), indent = true })
+    end
+    if #names == 0 then
+        tinsert(lines, { text = "Open a profession window once to record it.", dim = true, indent = true })
+    end
+    return lines
+end
+
+if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "function" then
+    ForgesLedger.RegisterBarPlugin({
+        id = "professions", label = "Professions", order = 50,
+        updateEvents = { "TRADE_SKILL_LIST_UPDATE", "SKILL_LINES_CHANGED", "TRADE_SKILL_CLOSE" },
+        text = function()
+            local ready, waiting = Cooldowns()
+            if #ready + #waiting == 0 then return "Professions" end
+            return "Professions: " .. #ready .. " ready", #ready > 0
+        end,
+        tooltip = function(tt)
+            local ready = Cooldowns()
+            for i, e in ipairs(ready) do
+                if i > 10 then
+                    tt:AddLine("and " .. (#ready - 10) .. " more - click for all", 0.55, 0.55, 0.55)
+                    break
+                end
+                tt:AddDoubleLine(e.name, e.who, 0.92, 0.90, 0.85, 0.90, 0.75, 0.25)
+            end
+            if #ready == 0 then tt:AddLine("No cooldowns ready", 0.92, 0.90, 0.85) end
+        end,
+        window = { title = "Professions", lines = BarWindowLines },
+    })
+end
 
 ---------------------------------------------------------------- /flp ---
 

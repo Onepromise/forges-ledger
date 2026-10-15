@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.4 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.5 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -16,9 +16,13 @@
 -- The dashboard notices the file change within a couple of seconds.
 --
 -- Nothing is sent anywhere. All data stays on your PC.
+--
+-- v2.5 adds the in-game bar (ForgesLedger_Bar.lua) and its windows
+-- (ForgesLedger_Windows.lua). The three files share data through `ns`, the
+-- private table WoW hands every file of one addon.
 
-local ADDON_NAME = "ForgesLedger"
-local VERSION = "2.4"
+local ADDON_NAME, ns = ...
+local VERSION = "2.5"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -27,6 +31,18 @@ ForgeGoldDB = ForgeGoldDB or {}
 local MAX_HISTORY_DAYS = 120
 local NUDGE_AFTER = 5 * 60  -- seconds since last save before the button nudges
 local PREFIX = "|cffFFD700[Forge's Ledger]|r "
+
+-- The public object satellites talk to (ForgesLedger.RegisterBarPlugin is
+-- added by ForgesLedger_Bar.lua). Satellites check it exists first, so they
+-- keep working with an older core that doesn't have it.
+ForgesLedger = ForgesLedger or {}
+ForgesLedger.version = VERSION
+ns.PREFIX, ns.VERSION = PREFIX, VERSION
+
+-- New data was recorded: let the bar redraw (once it's loaded).
+local function Changed()
+    if ns.DataChanged then ns.DataChanged() end
+end
 
 -- labels for the Keybindings screen (Bindings.xml refers to these names)
 BINDING_HEADER_FORGESLEDGER = "Forge's Ledger"
@@ -42,6 +58,7 @@ local function CharKey()
     realm = realm:gsub("[%s%'%-]", "")
     return (name or "Unknown") .. "-" .. realm
 end
+ns.CharKey = CharKey
 
 -- one history point per day (updates in place if already recorded today)
 local function RecordDay(history, money, today)
@@ -89,6 +106,7 @@ local function Snapshot()
     ForgeGoldDB.lastChar = key
     ForgeGoldDB.lastWrite = now
     ForgeGoldDB.version = VERSION
+    Changed()
 end
 
 -- Warband bank gold is shared by the whole account, so it's stored once in
@@ -123,6 +141,7 @@ local function SnapshotWarband()
     w.history = w.history or {}
     RecordDay(w.history, amount, date("%Y-%m-%d", now))
     ForgeGoldDB.warband = w
+    Changed()
 end
 
 -- Profession cooldowns (e.g. daily transmutes). The game only reports
@@ -192,6 +211,7 @@ local function ScanCooldowns(verbose)
     end
     say(string.format("%s: %d recipes known, %d on cooldown%s.", profName, learned, found,
         found > 0 and " - saved; /fl sync to update the app" or ""))
+    Changed()
 end
 
 -- the list-update event fires in bursts; scan once, a moment after it settles
@@ -227,9 +247,15 @@ local function SnapshotTodo()
             local rows = {}
             for _, a in ipairs(acts) do
                 local n = names[a.type] or tostring(a.type)
-                local r = rows[n] or { unlocked = 0, total = 0 }
+                local r = rows[n] or { unlocked = 0, total = 0, progress = 0, max = 0 }
+                local prog, need = a.progress or 0, a.threshold or 1
                 r.total = r.total + 1
-                if (a.progress or 0) >= (a.threshold or 1) then r.unlocked = r.unlocked + 1 end
+                if prog >= need then r.unlocked = r.unlocked + 1 end
+                -- progress toward the row's last slot and what that slot
+                -- needs, both from the game (e.g. 3 Mythic+ runs of 8) -
+                -- the bar's "Vault: M+ 3/8"
+                if prog > r.progress then r.progress = prog end
+                if need > r.max then r.max = need end
                 rows[n] = r
             end
             t.vault = rows
@@ -274,6 +300,7 @@ local function SnapshotTodo()
         end
     end
     c.todo = t
+    Changed()
 end
 
 -- several of these events can fire together; read once, a moment later
@@ -331,6 +358,7 @@ local function SavedText()
     if not ForgeGoldDB.savedAt then return "Not saved yet this session" end
     return "Dashboard last updated " .. Ago(time() - ForgeGoldDB.savedAt)
 end
+ns.SavedText = SavedText
 
 local function UpdateButton()
     if not syncButton then return end
@@ -472,8 +500,18 @@ end
 -- /fl sync   : save now and reload so the app updates immediately
 -- /fl button : show/hide the on-screen Sync button
 -- /fl cooldowns : list the open profession's cooldowns (diagnostics)
+-- /fl bar    : show/hide the bar (/fl bar top | bar bottom moves it)
+-- /fl ledger | gold | todo | vault | prof | settings : open a window -
+--              they all work with the bar hidden
 -- /fl help   : list commands
 -- /forgesledger works too, in case another addon also claims /fl
+-- command -> window id
+local WINDOW_COMMANDS = {
+    ledger = "ledger", window = "ledger", gold = "gold", todo = "todo", vault = "vault",
+    prof = "professions", profs = "professions", professions = "professions",
+    settings = "settings", options = "settings",
+}
+
 SLASH_FORGESLEDGER1 = "/fl"
 SLASH_FORGESLEDGER2 = "/forgesledger"
 SlashCmdList["FORGESLEDGER"] = function(msg)
@@ -486,12 +524,27 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         ForgeGoldDB.hideButton = not ForgeGoldDB.hideButton
         if syncButton then syncButton:SetShown(not ForgeGoldDB.hideButton) end
         print(PREFIX .. "Sync button " .. (ForgeGoldDB.hideButton and "hidden." or "shown."))
+    elseif cmd == "bar" then
+        local on = not ns.BarSettings().enabled
+        ns.SetBarEnabled(on)
+        print(PREFIX .. "Bar " .. (on and "shown." or "hidden. Type /fl bar to show it again."))
+    elseif cmd == "bar top" or cmd == "bar bottom" then
+        ns.SetBarAnchor(cmd == "bar top" and "TOP" or "BOTTOM")
+        print(PREFIX .. "Bar moved to the " .. (cmd == "bar top" and "top." or "bottom."))
+    elseif WINDOW_COMMANDS[cmd] then
+        -- toggles like a bar click; nil means there's no such window here
+        if ns.OpenWindow(WINDOW_COMMANDS[cmd], true) == nil then
+            print(PREFIX .. "That window isn't available here (its addon isn't installed, or this game version doesn't have it).")
+        end
     elseif cmd == "help" then
         print(PREFIX .. "v" .. VERSION .. " commands:")
         print("  /fl - gold total (characters + warband bank)")
         print("  /fl sync - update the app now (reloads UI)")
         print("  /fl button - show/hide the Sync button (shift-drag to move it)")
         print("  /fl cooldowns - with a profession window open, list its cooldowns")
+        print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
+        print("  /fl ledger, /fl gold, /fl todo, /fl vault, /fl prof - open a window")
+        print("  /fl settings - bar settings")
         print("  " .. SavedText())
     else
         local total, n = CharactersTotal()
