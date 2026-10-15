@@ -1,4 +1,4 @@
--- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.9)
+-- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.10)
 -- One builder makes every window the bar opens - the main Ledger window,
 -- each segment's details, settings - so they all look and behave the same:
 -- a title you can drag, a close button, and a scrolling list of lines.
@@ -199,7 +199,8 @@ end
 --                 value = "M+ 3/8",      -- right-hand text
 --                 sub = "Raid 2/6",      -- optional grey line under the name
 --                 progress = 0.375,      -- optional 0..1: draws the mini bar
---                 pulse = true }, ... }, -- optional: gentle "ready" pulse
+--                 pulse = true },        -- optional: gentle "ready" pulse
+--               { section = "Keys" }, ... }, -- a gold heading between groups
 --     empty  = "All cooldowns used.",    -- shown when there are no rows
 --     footer = { "+3 more" } }           -- optional grey lines
 -- Every card ends with "As of each character's last login." - the addon
@@ -304,15 +305,14 @@ local function Layout(data)
     end
     tip.title:SetText(tostring(data.title or ""))
     local rows = type(data.rows) == "table" and data.rows or {}
-    local tall = false
-    for _, d in ipairs(rows) do
-        if d.sub or d.progress then tall = true end
-    end
-    local rowH, iconS = tall and TALL or SHORT, tall and 24 or 16
     local width = TIP_PAD * 2 + 25 + tip.title:GetStringWidth()
     local y = -38
     for i, d in ipairs(rows) do
         local r = GetTipRow(i)
+        -- rows with a bar or a grey second line are tall; others short
+        local tall = d.sub ~= nil or d.progress ~= nil
+        local rowH, iconS = tall and TALL or SHORT, tall and 24 or 16
+        if d.section then rowH = SHORT + 4 end
         r:ClearAllPoints()
         r:SetPoint("TOPLEFT", 0, y)
         r:SetPoint("RIGHT", tip, "RIGHT")
@@ -326,8 +326,12 @@ local function Layout(data)
         if coords then r.icon:SetTexCoord(coords[1], coords[2], coords[3], coords[4]) end
         r.icon:SetShown(coords ~= nil)
         local cc = d.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[d.class]
-        r.name:SetText(tostring(d.name or "?"))
-        r.name:SetTextColor(cc and cc.r or C.bone[1], cc and cc.g or C.bone[2], cc and cc.b or C.bone[3])
+        r.name:SetText(tostring(d.section or d.name or "?"))
+        if d.section then  -- a gold section heading, e.g. "Keys"
+            r.name:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
+        else
+            r.name:SetTextColor(cc and cc.r or C.bone[1], cc and cc.g or C.bone[2], cc and cc.b or C.bone[3])
+        end
         r.name:ClearAllPoints()
         r.sub:SetText(d.sub and tostring(d.sub) or "")
         r.sub:SetShown(d.sub ~= nil)
@@ -335,6 +339,8 @@ local function Layout(data)
             r.name:SetPoint("TOPLEFT", TIP_PAD + iconS + 8, -4)
             r.sub:ClearAllPoints()
             r.sub:SetPoint("TOPLEFT", r.name, "BOTTOMLEFT", 0, -2)
+        elseif d.section then
+            r.name:SetPoint("BOTTOMLEFT", TIP_PAD, 3)
         else
             r.name:SetPoint("LEFT", TIP_PAD + iconS + 8, 0)
         end

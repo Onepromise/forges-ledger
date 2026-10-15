@@ -94,8 +94,17 @@ SATELLITES = {
         "schema": 1,
         "title": "Forge's Ledger: Professions",
         # describe what it does TODAY; update as guides/shopping lists land
-        "pitch": "your skill in every expansion at a glance, beside the profession window, and live skill numbers here",
+        "pitch": "a panel with your skill in every expansion, your cooldowns and crafts, and live skill numbers here",
         "games": ["retail"],  # Retail first; Forever later
+    },
+    "dungeons": {
+        "folder": "ForgesLedger_Dungeons",
+        "db": "ForgesLedgerDungeonsDB",
+        "schema": 1,
+        "title": "Forge's Ledger: Dungeons",
+        # in game only for now; a dashboard view comes in a later version
+        "pitch": "your keystone, Mythic+ rating, season bests and raid kills in game, plus who has which key on the bar",
+        "games": ["retail"],  # Mythic+ and modern lockouts are retail-only
     },
 }
 

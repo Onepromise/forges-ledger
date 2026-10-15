@@ -1,0 +1,8 @@
+## Interface: 120000, 120100, 120105
+## Title: Forge's Ledger: Dungeons
+## Notes: Your Mythic+ keystone, rating and season bests, and this week's raid kills, in a panel - plus who has which key across your characters. Optional companion to Forge's Ledger. Type /fld for options.
+## Author: Forge
+## Version: 1.0
+## OptionalDeps: ForgesLedger
+## SavedVariables: ForgesLedgerDungeonsDB
+ForgesLedger_Dungeons.lua

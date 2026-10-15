@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.9 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.10 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -22,7 +22,7 @@
 -- private table WoW hands every file of one addon.
 
 local ADDON_NAME, ns = ...
-local VERSION = "2.9"
+local VERSION = "2.10"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -468,6 +468,8 @@ local WINDOW_COMMANDS = {
     ledger = "ledger", window = "ledger", gold = "gold", todo = "todo", vault = "vault",
     prof = "professions", profs = "professions", professions = "professions",
     settings = "settings", options = "settings",
+    -- the Dungeons satellite takes over the vault segment and opens its panel
+    dungeons = "vault", keys = "vault",
 }
 
 SLASH_FORGESLEDGER1 = "/fl"
@@ -504,6 +506,7 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
         print("  /fl bar center or /fl bar left - center the segments or keep them on the left")
         print("  /fl ledger, /fl gold, /fl todo, /fl vault, /fl prof - open a window")
+        print("  /fl dungeons - the Dungeons panel (with the Dungeons companion addon)")
         print("  /fl settings - bar settings")
         print("  " .. SavedText())
     else

@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.9)
+-- Forge's Ledger: the bar (part of the core addon, v2.10)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -145,6 +145,21 @@ end
 ForgesLedger.RegisterBarPlugin = function(def)
     local ok, res = pcall(Register, def, false)
     return ok and res or false
+end
+
+-- A copy of a registered plugin's functions, so a satellite can build on
+-- the segment it's replacing instead of re-implementing it (the Dungeons
+-- satellite keeps the core's vault slot count and adds the keystone).
+-- Read it before registering the replacement. nil if there's no such id.
+-- Ask the bar to redraw soon, e.g. after a satellite has read new data
+-- that its segment shows. Cheap and debounced - call it freely.
+ForgesLedger.RefreshBar = function() QueueRefresh() end
+
+ForgesLedger.GetBarPlugin = function(id)
+    local p = plugins[id]
+    if not p then return nil end
+    return { id = p.id, label = p.label, order = p.order, text = p.text, roster = p.roster,
+             tooltip = p.tooltip, window = p.window, fromCore = p.fromCore }
 end
 
 local function Sorted()
