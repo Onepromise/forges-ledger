@@ -2201,6 +2201,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <button class="tab" data-tab="profs">Professions</button>
   <button class="tab" data-tab="reps">Reputations</button>
   <button class="tab" data-tab="weekly">Todo</button>
+  <button class="tab" data-tab="dung">Dungeons</button>
   <button class="tab" data-tab="classes">Classes</button>
   <button class="tab" data-tab="coll">Collections</button>
 </nav>
@@ -2256,6 +2257,17 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div class="hint">Green items are checked by the addon from what it saw in game since the reset; boxes are for you to tick. Daily ticks clear at the daily reset, weekly ticks on Tuesday (US).</div>
 </section>
 
+<section id="tab-dung" hidden>
+  <div class="controls">
+    <div class="seg" id="dscope"><button data-dscope="star">Tracked</button><button data-dscope="all">All with data</button></div>
+    <span class="count" id="dcount"></span>
+  </div>
+  <div id="dsatcard"></div>
+  <div class="stats" id="dstats" style="margin-top:4px"></div>
+  <div class="card scroll"><table id="dtable"></table></div>
+  <div class="hint">From the Forge&#39;s Ledger: Dungeons companion addon, as of each character&#39;s last login. A keystone or run from before this week&#39;s reset (Tuesday, US) isn&#39;t shown as this week&#39;s. Raid kills count bosses killed on each difficulty this week.</div>
+</section>
+
 <section id="tab-profs" hidden>
   <div class="controls">
     <select id="profsel"></select>
@@ -2267,6 +2279,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div id="satcard"></div>
   <div class="card scroll"><table class="matrix" id="matrix"></table></div>
   <div class="hint" id="phint"></div>
+  <div id="crafts"></div>
 </section>
 
 <section id="tab-classes" hidden>
@@ -2304,13 +2317,13 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
 // handy for bookmarks (and how the README screenshots are taken).
 (function(){
-  const h=location.hash.slice(1),tabs=["roster","level","profs","reps","weekly","classes","coll"];
+  const h=location.hash.slice(1),tabs=["roster","level","profs","reps","weekly","dung","classes","coll"];
   const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"],todo:["weekly",u=>0]};
   if(tabs.includes(h))ui.tab=h;
   else if(extra[h]){ui.tab=extra[h][0];extra[h][1](ui)}
@@ -2422,12 +2435,12 @@ function stat(v,l,k){
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
-  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","reps","weekly","classes","coll"];
+  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","reps","weekly","dung","classes","coll"];
   if(!avail.includes(ui.tab))ui.tab="roster";
   document.querySelectorAll(".tab").forEach(b=>b.hidden=!avail.includes(b.dataset.tab));
-  ["roster","level","profs","reps","weekly","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
+  ["roster","level","profs","reps","weekly","dung","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
   if(!D)return;
-  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="reps")renderReps();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="classes")renderClasses();else renderCollections();
+  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="reps")renderReps();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="dung")renderDungeons();else if(ui.tab==="classes")renderClasses();else renderCollections();
   saveUI();
 }
 
@@ -2504,8 +2517,75 @@ function satelliteCard(id){
   if(!s.characters)return '<div class="alert info">'+esc(s.title)+' is installed. Log into a character with it enabled to see its data here.</div>';
   return "";
 }
+/* ---------------- dungeons (Forge's Ledger: Dungeons companion) ---------------- */
+// Everything here is what the companion addon read in game, as of each
+// character's last login. Keys and runs older than this week's reset are
+// last week's, so they're not shown as current.
+function weekStartTs(){return D.todo&&D.todo.next_weekly?D.todo.next_weekly-7*86400:0}
+function dungInfo(c){
+  const d=c.sat&&c.sat.dungeons;if(!d)return null;
+  const ws=weekStartTs(),now=Date.now()/1000;
+  const key=d.keystone&&(d.keystoneAt||0)>=ws?d.keystone:null;
+  const runs=(d.mythicPlusAt||0)>=ws&&Array.isArray(d.weeklyRuns)?d.weeklyRuns:[];
+  const dungeons=Array.isArray(d.seasonDungeons)?d.seasonDungeons:[],bests=d.seasonBests||{};
+  let timed=0,best=0;
+  dungeons.forEach(g=>{const b=bests[g.id]||bests[String(g.id)];if(b){if(b.timed)timed++;best=Math.max(best,b.level||0)}});
+  // raid kills this week: bosses per difficulty, per raid
+  const raids=[];
+  Object.entries(d.raidKills||{}).forEach(([raid,diffs])=>{
+    const parts=Object.entries(diffs||{}).filter(([,e])=>e&&(e.resetAt||0)>now).map(([diff,e])=>[diff,Object.keys(e.bosses||{}).length]).filter(([,n])=>n>0);
+    if(parts.length)raids.push({raid,parts});
+  });
+  return {d,key,runs,dungeons:dungeons.length,timed,best,raids,rating:d.mythicPlusRating,at:d.mythicPlusAt||d.keystoneAt||0};
+}
+function renderDungeons(){
+  document.querySelectorAll("#dscope button").forEach(b=>b.classList.toggle("on",b.dataset.dscope===ui.dscope));
+  $("dsatcard").innerHTML=satelliteCard("dungeons");
+  const rows=D.characters.map(c=>({c,i:dungInfo(c)})).filter(r=>r.i&&(ui.dscope==="all"||r.c.tracked))
+    .sort((a,b)=>((b.i.key?b.i.key.level:0)-(a.i.key?a.i.key.level:0))||((b.i.rating||0)-(a.i.rating||0))||a.c.name.localeCompare(b.c.name));
+  $("dcount").textContent=rows.length+" character"+(rows.length===1?"":"s");
+  if(!rows.length){
+    $("dstats").innerHTML="";
+    $("dtable").innerHTML='<tbody><tr><td class="empty">'+(ui.dscope==="all"?"No dungeon data yet - log into a character with the Dungeons companion addon enabled.":"None of your tracked characters have dungeon data yet - try All with data.")+"</td></tr></tbody>";
+    return;
+  }
+  const keyed=rows.filter(r=>r.i.key),top=keyed[0];
+  const rated=rows.filter(r=>r.i.rating).sort((a,b)=>b.i.rating-a.i.rating)[0];
+  const bosses=rows.reduce((n,r)=>n+r.i.raids.reduce((m,x)=>m+x.parts.reduce((k,p)=>k+p[1],0),0),0);
+  $("dstats").innerHTML=stat(keyed.length+" / "+rows.length,"keystones this week")+
+    stat(top?"+"+top.i.key.level:"—","highest key"+(top?"<br>"+esc(top.i.key.name||"?")+" · "+esc(top.c.name):""))+
+    stat(rated?Math.round(rated.i.rating).toLocaleString():"—",rated?"best Mythic+ rating<br>"+esc(rated.c.name):"best Mythic+ rating")+
+    stat(bosses.toLocaleString(),"raid bosses killed this week");
+  $("dtable").innerHTML="<thead><tr><th>Character</th><th>Keystone</th><th class=\"num\">Rating</th><th>This week&#39;s runs</th><th>Season bests</th><th>Raids this week</th><th>Read</th></tr></thead><tbody>"+
+    rows.map(({c,i})=>"<tr><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+" · "+c.level+"</div></td>"+
+      "<td>"+(i.key?'<b class="goldv">+'+i.key.level+"</b> "+esc(i.key.name||""):'<span class="faint">no key this week</span>')+"</td>"+
+      '<td class="num">'+(i.rating?Math.round(i.rating).toLocaleString():'<span class="faint">—</span>')+"</td>"+
+      "<td>"+(i.runs.length?'<b>'+i.runs.length+"</b> · "+i.runs.slice(0,8).map(l=>"+"+l).join(" "):'<span class="faint">none yet</span>')+"</td>"+
+      "<td>"+(i.dungeons?'<b>'+i.timed+"</b> of "+i.dungeons+" timed"+(i.best?' · best <b>+'+i.best+"</b>":""):'<span class="faint">—</span>')+"</td>"+
+      "<td>"+(i.raids.length?i.raids.map(x=>esc(x.raid)+': '+x.parts.map(p=>esc(p[0])+" "+p[1]).join(", ")).join("<br>"):'<span class="faint">none yet</span>')+"</td>"+
+      '<td class="dim">'+(i.at?ago(i.at):"—")+"</td></tr>").join("")+"</tbody>";
+}
+
+/* recent crafting, from the Professions companion's session counts */
+function renderCrafts(){
+  const list=D.characters.map(c=>{
+    const p=c.sat&&c.sat.professions;if(!p)return null;
+    let s=p.session,label="This session";
+    if(!s||!(s.crafts>0)){s=p.lastSession;label="Last session"}
+    if(!s||!(s.crafts>0))return null;
+    let best=null,bestN=0;Object.entries(s.made||{}).forEach(([n,m])=>{if(m&&m.count>bestN){best=n;bestN=m.count}});
+    return {c,label,s,best,bestN};
+  }).filter(Boolean).filter(r=>!ui.pstar||r.c.tracked).sort((a,b)=>(b.s.startedAt||0)-(a.s.startedAt||0)).slice(0,12);
+  $("crafts").innerHTML=list.length?'<div class="panel-h">Recent crafting</div><div class="card"><table><tbody>'+
+    list.map(r=>"<tr><td>"+nameHtml(r.c)+'</td><td class="dim">'+r.label+"</td><td><b>"+r.s.crafts+"</b> craft"+(r.s.crafts===1?"":"s")+
+      // "most made" only means something when one recipe was made more than once
+      (r.bestN>1?' · most made: '+esc(r.best)+" ×"+r.bestN:r.s.crafts>1?" · "+Object.keys(r.s.made||{}).length+" different recipes":"")+'</td><td class="dim num">'+(r.s.startedAt?ago(r.s.startedAt):"")+"</td></tr>").join("")+
+    '</tbody></table></div><div class="hint">From the Forge&#39;s Ledger: Professions companion addon - crafts made with the profession window open, per play session.</div>':"";
+}
+
 function renderProfs(){
   $("satcard").innerHTML=satelliteCard("professions");
+  renderCrafts();
   const idx=profIndex(),names=Object.keys(idx).sort();
   if(ui.prof&&ui.prof!=="__planner"&&!idx[ui.prof])ui.prof="";
   $("plansum").hidden=true;$("psecwrap").hidden=ui.prof!=="__planner";
@@ -2967,13 +3047,14 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dscope],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
   if(!el)return;
   if(el.dataset.repview){ui.repview=el.dataset.repview;render()}
   else if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
   else if(el.dataset.game){if(ui.game!==el.dataset.game){ui.game=el.dataset.game;COL=null;saveUI();load()}}
   else if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
+  else if(el.dataset.dscope){ui.dscope=el.dataset.dscope;render()}
   else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
   else if(el.dataset.goal){goalAction(el.dataset.goal)}
   else if(el.dataset.tab){ui.tab=el.dataset.tab;render()}
