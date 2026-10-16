@@ -24,20 +24,20 @@ most rested.
 
 ![Leveling](docs/screenshots/leveling.png)
 
-**Professions** — skill per expansion (Classic through Midnight) for every
-character, with the recipes each one knows and the ones they're missing.
+**Professions** — your best skill in every profession for each expansion
+(Classic through Midnight) and who has it, at a glance. Click a profession to
+see every character's skill, the recipes each one knows and the ones they're
+missing. The **gap planner** lists every character × profession pair that
+isn't maxed yet, Crafter-tagged characters first.
 
 ![Professions](docs/screenshots/professions.png)
-
-**Gap planner** — every character × profession pair that isn't maxed for
-Midnight yet, Crafter-tagged characters first, with the totals per profession.
-
-![Gap planner](docs/screenshots/planner.png)
 
 **Reputations** — every reputation grouped by expansion, with how many are
 maxed in each (Exalted, a friendship's top rank, or the last Renown level),
 paragon progress, a "closest to next level" view, and "hide maxed". Shows your
 best standing across the account, or one character's.
+
+![Reputations](docs/screenshots/reputations.png)
 
 **Todo** — daily and weekly tasks per character. The addon checks most of
 them for you from what it sees in game: Great Vault slots, unclaimed Vault
@@ -45,7 +45,7 @@ rewards, Mythic+ runs, raid lockouts, world bosses, profession cooldowns,
 and whether a Timewalking event is on. The rest are checkboxes that clear at
 the daily or weekly reset. Forever has its own, shorter list.
 
-![Weekly](docs/screenshots/weekly.png)
+![Todo](docs/screenshots/todo.png)
 
 **Classes** — which classes you have, which are missing, and which have no
 max-level character yet.
@@ -54,7 +54,17 @@ max-level character yet.
 
 **Collections** — mounts, battle pets, and achievement progress by category.
 
-![Achievements](docs/screenshots/achievements.png)
+![Collections](docs/screenshots/collections.png)
+
+**Themes** — pick a look in Settings → *Appearance*: **Tempered Steel** (the
+original), **Ember Forge** (molten ember, a goal bar that burns as it fills,
+drifting sparks) or **Moonlit Tide** (moonrise over the ocean, a gold
+crescent, twinkling stars). Switching is instant; the animations can be
+turned off, and stay off if Windows is set to reduce animations.
+
+![Ember Forge](docs/screenshots/theme-ember.png)
+
+![Moonlit Tide](docs/screenshots/theme-moonlit.png)
 
 **Live updates** — Sync on the in-game bar, a keybind, or `/fl sync` updates
 the dashboard within seconds. It also refreshes from Blizzard on startup and
@@ -110,6 +120,17 @@ character's numbers; click it for details. Right-click the anvil for options.
 - `/fl cooldowns` — with a profession window open, list its cooldowns
 - Keybind: Options → Keybindings → AddOns → Forge's Ledger
 - `/forgesledger` works too, if another addon also uses `/fl`
+
+Two optional **companion addons** install from Settings → *Companion addons*:
+
+- **Forge's Ledger: Professions** — a panel that opens with your profession
+  window: your skill in every expansion, every cooldown with a live countdown,
+  and how many crafts you made this session. Its tabs open each profession.
+  `/flp` for options.
+- **Forge's Ledger: Dungeons** — your Mythic+ keystone, rating and season
+  bests, and this week's raid kills by difficulty. On the bar's Great Vault
+  segment it adds your key, and its hover card shows which key every
+  character holds. `/fld` for options.
 
 ## Running from source
 

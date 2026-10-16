@@ -1796,25 +1796,41 @@ _DIVIDER = _svg(
 
 def _flames(seed, width, height):
     """A strip of flame tongues (yellow at the base, fading orange tips) as
-    a CSS url(). It tiles sideways, so the bar's fire can flow."""
+    a CSS url(). It tiles sideways so the bar's fire can flow: the tongue
+    widths add up to exactly the strip's width, and tongues that cross an
+    edge are drawn again on the other side, so the repeat has no seam (a
+    tongue squeezed into the last few pixels showed as a thin spike)."""
     import random
     rnd = random.Random(seed)
-    x, tongues = 0.0, []
-    while x < width:
-        w = rnd.uniform(7, 15)
-        w = min(w, width - x)
-        h = rnd.uniform(height * 0.45, height * 0.98)
-        lean = rnd.uniform(-2.5, 2.5)
-        x1, xm = x + w, x + w / 2 + lean
-        tongues.append("M%.1f %d Q%.1f %.1f %.1f %.1f Q%.1f %.1f %.1f %d Z" % (
-            x, height, x + w * 0.15, height - h * 0.55, xm, height - h, x1 - w * 0.15, height - h * 0.55, x1, height))
-        x = x1 - w * 0.25  # tongues overlap a little
+    widths, total = [], 0.0
+    while total < width:
+        w = rnd.uniform(9, 16)
+        widths.append(w)
+        total += w
+    widths = [w * width / total for w in widths]
+    shapes, x = [], 0.0
+    for w in widths:
+        h = rnd.uniform(height * 0.45, height * 0.95)
+        tip_x, tip_y = x + w / 2 + rnd.uniform(-0.22, 0.22) * w, height - h
+        x0, x1 = x - w * 0.18, x + w * 1.18  # a little wider than its slot: neighbours blend
+        shapes.append((x0, x1, tip_x, tip_y, w, h))
+        x += w
+    paths = []
+    for x0, x1, tx, ty, w, h in shapes:
+        for shift in (0, -width, width):
+            if shift and not (x1 + shift > 0 and x0 + shift < width):
+                continue  # the copy wouldn't show
+            a, b, t = x0 + shift, x1 + shift, tx + shift
+            # soft curved sides that pinch to a slightly leaning tip
+            paths.append("M%.1f %d C%.1f %.1f %.1f %.1f %.1f %.1f C%.1f %.1f %.1f %.1f %.1f %d Z" % (
+                a, height, a + w * 0.35, height - h * 0.3, t - w * 0.28, ty + h * 0.38, t, ty,
+                t + w * 0.22, ty + h * 0.42, b - w * 0.35, height - h * 0.28, b, height))
     return _svg(
         "<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d' viewBox='0 0 %d %d'>"
         "<defs><linearGradient id='f' x1='0' y1='1' x2='0' y2='0'>"
         "<stop offset='0' stop-color='#ffe3a0'/><stop offset='.35' stop-color='#ff9a2e'/>"
         "<stop offset='.75' stop-color='#ff5a14' stop-opacity='.7'/><stop offset='1' stop-color='#ff3d00' stop-opacity='0'/>"
-        "</linearGradient></defs><path d='%s' fill='url(#f)'/></svg>" % (width, height, width, height, " ".join(tongues)))
+        "</linearGradient></defs><path d='%s' fill='url(#f)'/></svg>" % (width, height, width, height, " ".join(paths)))
 
 
 THEMES = {
@@ -1865,8 +1881,8 @@ header::after{content:"";position:absolute;right:34%;top:-22px;width:200px;heigh
 .goal .gt::before{content:"";width:24px;height:24px;background:%(i_flame)s center/contain no-repeat;filter:drop-shadow(0 0 6px rgba(255,107,26,.7))}
 .goal .gv{font-size:18px;text-shadow:0 0 18px rgba(232,182,76,.3)}
 .goal .bar{height:16px;margin:18px 0 12px;border-radius:10px;background:#140d0a;box-shadow:inset 0 0 0 1px #3a2418,0 0 0 4px rgba(255,107,26,.05);overflow:visible;padding:3px}
-.goal .bar>i{position:relative;height:10px;border-radius:6px;background:linear-gradient(90deg,#7c2d12,#c2410c 25%,#ff6b1a 55%,#ffa040 80%,#ffe0a0);background-size:200% 100%;box-shadow:0 0 14px 2px rgba(255,107,26,.55),0 0 34px 4px rgba(255,90,20,.25)}
-.goal .bar>i::before{content:"";position:absolute;left:0;right:-4px;bottom:35%%;height:28px;background:%(flames1)s 0 100%%/120px 28px repeat-x,%(flames2)s 40px 100%%/84px 20px repeat-x;filter:drop-shadow(0 0 5px rgba(255,120,30,.65));transform-origin:bottom;pointer-events:none}
+.goal .bar>i{position:relative;height:10px;border-radius:6px;background:repeating-linear-gradient(90deg,rgba(255,236,190,0) 0 34px,rgba(255,236,190,.38) 46px,rgba(255,236,190,0) 58px 80px),linear-gradient(90deg,#7c2d12,#c2410c 25%,#ff6b1a 55%,#ffa040 80%,#ffe0a0);background-size:80px 100%,100% 100%;box-shadow:0 0 14px 2px rgba(255,107,26,.55),0 0 34px 4px rgba(255,90,20,.25)}
+.goal .bar>i::before{content:"";position:absolute;left:0;right:-4px;bottom:35%%;height:28px;background:%(flames1)s 0 100%%/120px 28px repeat-x,%(flames2)s 40px 100%%/84px 20px repeat-x;pointer-events:none}
 .goal .bar>i::after{content:"";position:absolute;right:-4px;top:-6px;bottom:-6px;width:14px;border-radius:50%%;background:radial-gradient(circle,#fff6d8,#ffc46b 35%%,rgba(255,107,26,0) 70%%)}
 .bar>i{background:linear-gradient(90deg,#9a3412,#ff6b1a 72%%,#ffb35c);box-shadow:0 0 8px var(--accent-glow)}
 .bar.cap>i{background:var(--success);box-shadow:none}
@@ -1883,9 +1899,9 @@ tbody tr:hover>td{background:rgba(255,107,26,.07)}
 [data-theme="ember-forge"][data-fx="on"] .goal .bar>i{animation:fl-burn 2.6s linear infinite}
 [data-theme="ember-forge"][data-fx="on"] .goal .bar>i::before{animation:fl-flow 1.5s linear infinite,fl-lick .45s ease-in-out infinite alternate}
 [data-theme="ember-forge"][data-fx="on"] .goal .bar>i::after{animation:fl-flicker .16s ease-in-out infinite alternate}
-@keyframes fl-burn{to{background-position:-200% 0}}
+@keyframes fl-burn{to{background-position:80px 0,0 0}}
 @keyframes fl-flow{to{background-position:-120px 100%,-44px 100%}}
-@keyframes fl-lick{0%{transform:scaleY(.8);opacity:.85}100%{transform:scaleY(1.12);opacity:1}}
+@keyframes fl-lick{0%{opacity:.78}100%{opacity:1}}
 @keyframes fl-flicker{from{opacity:.7;transform:scale(.85)}to{opacity:1;transform:scale(1.15)}}
 """,
     },
@@ -2002,9 +2018,19 @@ def current_theme(settings=None):
     return tid, ("off" if st.get("theme_fx") is False else "on")
 
 
+def theme_swatches(current):
+    """Quick theme switch for the dashboard header (Luna's idea): one round
+    swatch per theme, in its signature colour. Same save as Settings."""
+    esc = html.escape
+    return "".join('<button class="tsw%s" data-tsw="%s" style="--sw:%s" title="%s" aria-label="%s theme"></button>'
+                   % (" on" if tid == current else "", esc(tid), esc(t["swatches"][1]), esc(t["name"]), esc(t["name"]))
+                   for tid, t in THEMES.items())
+
+
 def page_html():
     tid, fx = current_theme()
-    return PAGE.replace("%%THEME_CSS%%", THEME_CSS).replace("%%THEME%%", tid).replace("%%FX%%", fx)
+    return (PAGE.replace("%%THEME_CSS%%", THEME_CSS).replace("%%THEME%%", tid).replace("%%FX%%", fx)
+            .replace("%%THEME_SWATCHES%%", theme_swatches(tid)))
 
 
 # raw string so JS/CSS in the page can never be mangled by Python escapes
@@ -2130,6 +2156,10 @@ input[type=number]:focus,input[type=date]:focus{border-color:var(--accent)}
 .good{color:var(--success) !important}.warn{color:var(--warn) !important}
 .mg{color:var(--gold)}.ms{color:var(--silver)}.mc{color:var(--copper)}
 #gamesw{vertical-align:middle;margin-right:6px}
+.themesw{display:inline-flex;gap:6px;align-items:center;margin-right:10px;vertical-align:middle}
+.tsw{width:18px;height:18px;border-radius:50%;background:var(--sw);border:2px solid var(--bg);box-shadow:0 0 0 1px var(--line);cursor:pointer;padding:0}
+.tsw:hover{box-shadow:0 0 0 1px var(--text-dim)}
+.tsw.on{box-shadow:0 0 0 2px var(--text),0 0 8px var(--sw)}
 #gamesw button{padding:8px 14px}
 .picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:14px}
 .pick{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
@@ -2158,7 +2188,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
 
 <header>
   <div><h1>Forge&#39;s Ledger</h1><div class="sub" id="syncinfo">Loading…</div></div>
-  <div><div class="seg" id="gamesw" hidden><button data-game="retail">Retail</button><button data-game="forever">Forever</button></div>
+  <div><span class="themesw" id="themesw">%%THEME_SWATCHES%%</span><div class="seg" id="gamesw" hidden><button data-game="retail">Retail</button><button data-game="forever">Forever</button></div>
   <a class="btn" href="/setup">Settings</a> <a class="btn" href="/connect">Connect Battle.net</a> <button class="btn primary" id="syncbtn">Sync now</button></div>
 </header>
 <div id="alert"></div>
@@ -2985,11 +3015,22 @@ function agoShort(ts){const m=Math.round((Date.now()/1000-ts)/60);return m<1?"ju
 render();load();poll();
 // a theme picked in Settings (in another tab) repaints this page at once
 if("BroadcastChannel" in window){
-  new BroadcastChannel("forges-ledger-theme").onmessage=e=>{
+  window.themeCh=new BroadcastChannel("forges-ledger-theme");
+  themeCh.onmessage=e=>{
     const d=e.data||{};if(!d.theme)return;
     document.documentElement.dataset.theme=d.theme;document.documentElement.dataset.fx=d.fx?"on":"off";
+    markSwatch(d.theme);
   };
 }
+function markSwatch(t){document.querySelectorAll(".tsw").forEach(b=>b.classList.toggle("on",b.dataset.tsw===t))}
+// header swatches: switch instantly; saved in the app's settings like Settings > Appearance
+document.getElementById("themesw").addEventListener("click",async e=>{
+  const b=e.target.closest(".tsw");if(!b)return;
+  const root=document.documentElement,theme=b.dataset.tsw,fx=root.dataset.fx!=="off";
+  root.dataset.theme=theme;markSwatch(theme);
+  if(window.themeCh)themeCh.postMessage({theme,fx});
+  try{await postJSON("/api/theme",{theme,fx})}catch(err){}
+});
 </script></body></html>
 """
 
