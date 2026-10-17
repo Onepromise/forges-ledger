@@ -1,4 +1,4 @@
--- Forge's Ledger: Professions v1.9 (retail)
+-- Forge's Ledger: Professions v1.10 (retail)
 -- A companion to Forge's Ledger, and useful on its own: a panel with your
 -- skill in every expansion's tier of each profession, plus your profession
 -- cooldowns, that opens with the profession window. It also records those
@@ -18,7 +18,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.9"
+local VERSION = "1.10"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -66,11 +66,30 @@ end
 -- keepUnlearned: record tiers at 0 too. Only used for professions the
 -- character has - the login scan covers every profession in the game, and
 -- keeping zeros from it would fill the file with professions you don't have.
+-- set further down (next craft and shopping list, celebration, panel)
+local ScanRecipes, Celebrate = function() end, function() end
+local RenderNext, RenderShop, ToggleShop, RenderPlan
+local BuildShopping, PlanCrafted = function() end, function() end
+local pendingCelebrations = {}
+-- profession -> the expansion tier the panel shows (picked by clicking it in
+-- the panel, or by switching the profession window to it)
+local selectedTier = {}
+
 local function RecordTier(c, info, keepUnlearned)
     if type(info) ~= "table" or not info.professionName or info.professionName == "" then return end
     if not info.parentProfessionName then return end  -- a base profession, not a tier
     local max = info.maxSkillLevel or 0
     if not keepUnlearned and (info.skillLevel or 0) <= 0 and max <= 0 then return end
+    local prev, skill = c.data.tiers[info.professionName], info.skillLevel or 0
+    c.data.celebrated = c.data.celebrated or {}
+    if max > 0 and skill >= max and (tonumber(c.data.celebrated[info.professionName]) or 0) < max then
+        -- only a change we saw happen is cheered; a tier first seen already
+        -- maxed is just noted, so logging in never celebrates
+        if prev and (tonumber(prev.skill) or 0) < max then
+            tinsert(pendingCelebrations, info.professionName .. " " .. skill .. " / " .. max)
+        end
+        c.data.celebrated[info.professionName] = max
+    end
     c.data.tiers[info.professionName] = {
         profession = info.parentProfessionName,
         expansion = info.expansionName,
@@ -145,8 +164,13 @@ local function Scan()
         end
     end
     RebuildCurrent(c)
+    ScanRecipes(c)  -- next craft and shopping list, with a profession window open
     c.data.lastScan = time()
     c.exportedAt = time()
+    if #pendingCelebrations > 0 then
+        Celebrate(table.concat(pendingCelebrations, "  \194\183  "))
+        wipe(pendingCelebrations)
+    end
 end
 
 --------------------------------------------------- the open profession ---
@@ -166,6 +190,17 @@ local function CurrentTierName()
     if not (T and T.GetChildProfessionInfo) then return nil end
     local ok, info = pcall(T.GetChildProfessionInfo)
     return ok and type(info) == "table" and info.professionName or nil
+end
+
+-- The panel follows the profession window: whichever expansion the window
+-- is switched to becomes the one the panel shows for that profession.
+local function FollowWindowTier()
+    local T = C_TradeSkillUI
+    if not (T and T.GetChildProfessionInfo) then return end
+    local ok, info = pcall(T.GetChildProfessionInfo)
+    if ok and type(info) == "table" and info.parentProfessionName and info.professionName then
+        selectedTier[info.parentProfessionName] = info.professionName
+    end
 end
 
 local function ProfessionWindowShown()
@@ -206,6 +241,7 @@ local function RecordCraft(spellID)
     m.count = (tonumber(m.count) or 0) + 1
     m.icon = info.icon or m.icon
     s.made[info.name] = m
+    PlanCrafted(c, spellID)
     c.exportedAt = time()
     return true
 end
@@ -230,17 +266,369 @@ local function SessionLine()
         .. (best and ("  \194\183  most made: " .. best .. " \195\151" .. bestN) or ""), icon
 end
 
+------------------------------------------- next craft and shopping list ---
+-- With a profession window open, read that expansion tier's recipes from
+-- the game (C_TradeSkillUI) and work out:
+--   * the best next craft: a recipe this character KNOWS that still gives
+--     skill - its first-craft bonus first, then orange, then yellow -
+--     preferring one whose reagents are already in the bags, then the one
+--     needing the fewest reagents. (No prices: the auction house is out of
+--     scope.) A recipe whose reagents the game won't list is never picked.
+--   * the plan: every known recipe that still gives skill (orange, yellow,
+--     green - the colours the game reports at your current skill), each
+--     with a craft count YOU set in the panel. The game doesn't say at which
+--     skill a recipe changes colour, so the addon never guesses counts.
+--   * the shopping list: the reagents for one of each known recipe that
+--     still has its first-craft bonus, plus the planned crafts (or, with
+--     nothing planned, one of the next craft).
+-- Stored per tier (skill and max come from the game too). Informational
+-- only - nothing here crafts, queues or clicks anything.
+
+local DIFF = Enum and Enum.TradeskillRelativeDifficulty or {}
+local ORANGE, YELLOW, EASY = DIFF.Optimal, DIFF.Medium, DIFF.Easy
+local BASIC = Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic
+
+-- The reagents one craft must have: {itemID, alts (other qualities of the
+-- same reagent), qty}. nil if the game won't list them.
+local function ReagentsFor(recipeID)
+    local T = C_TradeSkillUI
+    if not (T and T.GetRecipeSchematic) then return nil end
+    local ok, sch = pcall(T.GetRecipeSchematic, recipeID, false)
+    if not ok or type(sch) ~= "table" or type(sch.reagentSlotSchematics) ~= "table" then return nil end
+    local list = {}
+    for _, slot in ipairs(sch.reagentSlotSchematics) do
+        local basic = BASIC == nil or slot.reagentType == BASIC
+        if slot.required and basic then
+            local ids = {}
+            for _, r in ipairs(type(slot.reagents) == "table" and slot.reagents or {}) do
+                if r.itemID then tinsert(ids, r.itemID) end
+            end
+            if #ids == 0 then return nil end  -- a required reagent we can't name: unknown
+            tinsert(list, { itemID = ids[1], alts = ids, qty = tonumber(slot.quantityRequired) or 1 })
+        end
+    end
+    return list
+end
+
+-- Looked up once a session: a recipe's expansion and its reagents don't
+-- change, and asking the game for them is the slow part of a scan.
+local recipeTier, recipeReagents = {}, {}
+
+local function RecipeInTier(id, professionID)
+    local T = C_TradeSkillUI
+    if not (professionID and T.GetProfessionInfoByRecipeID) then return true end
+    if recipeTier[id] == nil then
+        local ok, pinfo = pcall(T.GetProfessionInfoByRecipeID, id)
+        recipeTier[id] = ok and type(pinfo) == "table" and pinfo.professionID or false
+    end
+    return recipeTier[id] == false or recipeTier[id] == professionID
+end
+
+local function CachedReagents(id)
+    if recipeReagents[id] == nil then recipeReagents[id] = ReagentsFor(id) or false end
+    return recipeReagents[id] or nil
+end
+
+local function ItemName(id)
+    local name
+    if C_Item and C_Item.GetItemNameByID then
+        local ok, n = pcall(C_Item.GetItemNameByID, id)
+        name = ok and n or nil
+    end
+    if not name and GetItemInfo then
+        local ok, n = pcall(GetItemInfo, id)
+        name = ok and n or nil
+    end
+    if not name and C_Item and C_Item.RequestLoadItemDataByID then
+        pcall(C_Item.RequestLoadItemDataByID, id)  -- arrives later; the list fills in then
+    end
+    return name
+end
+
+local function ItemIcon(id)
+    if C_Item and C_Item.GetItemIconByID then
+        local ok, t = pcall(C_Item.GetItemIconByID, id)
+        if ok and t then return t end
+    end
+    return "Interface\\Icons\\INV_Misc_QuestionMark"
+end
+
+local bankSeen = false  -- the bank was opened this session, so bank counts are real
+
+-- How many of a reagent (any quality) the character has: bags, and the
+-- bank too once it has been opened this session (nil = unknown).
+local function Have(alts)
+    local bags, total = 0, 0
+    local count = (C_Item and C_Item.GetItemCount) or GetItemCount
+    for _, id in ipairs(alts) do
+        local ok, n = pcall(count, id)
+        bags = bags + (ok and tonumber(n) or 0)
+        if bankSeen then
+            local ok2, all = pcall(count, id, true, false, true, true)
+            total = total + (ok2 and tonumber(all) or 0)
+        end
+    end
+    return bags, bankSeen and total or nil
+end
+
+local function EnoughFor(reagents)
+    for _, r in ipairs(reagents) do
+        if Have(r.alts) < r.qty then return false end
+    end
+    return true
+end
+
+ScanRecipes = function(c)
+    local T = C_TradeSkillUI
+    if not (ProfessionsFrame and ProfessionsFrame:IsShown()) then return end
+    if not (T and T.GetAllRecipeIDs and T.GetRecipeInfo and T.GetChildProfessionInfo) then return end
+    local ok, child = pcall(T.GetChildProfessionInfo)
+    if not ok or type(child) ~= "table" or not child.professionName or not child.parentProfessionName then return end
+    local tier, skill, max = child.professionName, child.skillLevel or 0, child.maxSkillLevel or 0
+    local okIds, ids = pcall(T.GetAllRecipeIDs)
+    if not okIds or type(ids) ~= "table" then return end
+    local candidates, firsts, planned = {}, {}, {}
+    for _, id in ipairs(ids) do
+        local okI, info = pcall(T.GetRecipeInfo, id)
+        -- only known, real crafts (not recrafts/salvage) - checked first,
+        -- since it's cheap and rules out most of the list - then only this
+        -- tier's recipes
+        if okI and type(info) == "table" and info.learned and not info.isRecraft
+                and not info.isSalvageRecipe and not info.isDummyRecipe and info.name
+                and RecipeInTier(id, child.professionID) then
+            local first = info.firstCraft == true
+            local diff = info.relativeDifficulty
+            local color = (ORANGE ~= nil and diff == ORANGE and "orange") or (YELLOW ~= nil and diff == YELLOW and "yellow")
+                          or (EASY ~= nil and diff == EASY and "green") or nil
+            local gives = first or color == "orange" or color == "yellow"
+            if gives or color then
+                local reagents = CachedReagents(id)
+                if reagents then
+                    local qty = 0
+                    for _, r in ipairs(reagents) do qty = qty + r.qty end
+                    local entry = { id = id, name = info.name, icon = info.icon, first = first,
+                                    rank = first and 0 or (diff == ORANGE and 1 or 2), color = color or "grey",
+                                    ups = tonumber(info.numSkillUps),
+                                    have = EnoughFor(reagents), qty = qty, reagents = reagents }
+                    if gives then tinsert(candidates, entry) end
+                    if first then tinsert(firsts, entry) end
+                    tinsert(planned, entry)
+                end
+            end
+        end
+    end
+    c.data.nextCraft = c.data.nextCraft or {}
+    c.data.shoppingList = c.data.shoppingList or {}
+    c.data.plan = c.data.plan or {}
+    if max > 0 and skill >= max then
+        c.data.nextCraft[tier] = { profession = child.parentProfessionName, at = time(), none = "maxed" }
+        c.data.plan[tier] = nil
+        c.data.shoppingList[tier] = nil
+        return
+    end
+    -- the plan: orange, then yellow, then green; within a colour first
+    -- crafts, then what you have reagents for, then the fewest reagents
+    local colorRank = { orange = 1, yellow = 2, green = 3, grey = 4 }
+    table.sort(planned, function(a, b)
+        if a.color ~= b.color then return colorRank[a.color] < colorRank[b.color] end
+        if a.first ~= b.first then return a.first end
+        if a.have ~= b.have then return a.have end
+        if a.qty ~= b.qty then return a.qty < b.qty end
+        return a.name < b.name
+    end)
+    local recipes = {}
+    for i = 1, math.min(#planned, 40) do  -- a cap keeps the saved file small
+        local e = planned[i]
+        local reagents = {}
+        for _, r in ipairs(e.reagents) do
+            tinsert(reagents, { itemID = r.itemID, alts = r.alts, qty = r.qty, name = ItemName(r.itemID) })
+        end
+        tinsert(recipes, { recipeID = e.id, name = e.name, icon = e.icon, color = e.color, first = e.first,
+                           ups = e.ups, reagents = reagents })
+    end
+    c.data.plan[tier] = { profession = child.parentProfessionName, expansion = child.expansionName,
+                          skill = skill, max = max, at = time(), recipes = recipes }
+    if #candidates == 0 then
+        c.data.nextCraft[tier] = { profession = child.parentProfessionName, at = time(),
+                                   none = "no known recipe gives skill right now" }
+        BuildShopping(c, tier)
+        return
+    end
+    table.sort(candidates, function(a, b)
+        if a.rank ~= b.rank then return a.rank < b.rank end
+        if a.have ~= b.have then return a.have end
+        if a.qty ~= b.qty then return a.qty < b.qty end
+        return a.name < b.name
+    end)
+    local best = candidates[1]
+    local why = best.first and "first craft bonus" or (best.rank == 1 and "orange" or "yellow")
+    why = why .. (best.have and " · you have the reagents" or " · reagents needed")
+    c.data.nextCraft[tier] = { profession = child.parentProfessionName, recipeID = best.id,
+                               name = best.name, icon = best.icon, reason = why, at = time() }
+    BuildShopping(c, tier)
+end
+
+-- The craft counts set in the plan: {recipeID -> count}, per character and tier.
+local function PlanCounts(c, tier)
+    c.data.planCounts = type(c.data.planCounts) == "table" and c.data.planCounts or {}
+    local t = c.data.planCounts[tier]
+    if type(t) ~= "table" then
+        t = {}
+        c.data.planCounts[tier] = t
+    end
+    return t
+end
+
+-- The tier's shopping list, from the saved plan (so changing a count needs
+-- no rescan): one of each first craft, the planned counts, and - with
+-- nothing planned - one of the next craft.
+BuildShopping = function(c, tier)
+    c.data.shoppingList = c.data.shoppingList or {}
+    local plan = type(c.data.plan) == "table" and c.data.plan[tier]
+    if type(plan) ~= "table" or type(plan.recipes) ~= "table" then
+        c.data.shoppingList[tier] = nil
+        return
+    end
+    local counts = PlanCounts(c, tier)
+    local nc = type(c.data.nextCraft) == "table" and c.data.nextCraft[tier]
+    local planned = 0
+    for _, r in ipairs(plan.recipes) do planned = planned + (tonumber(counts[r.recipeID]) or 0) end
+    local items, recipes = {}, {}
+    for _, r in ipairs(plan.recipes) do
+        local n = tonumber(counts[r.recipeID]) or 0
+        if r.first then n = math.max(n, 1) end
+        if planned == 0 and type(nc) == "table" and nc.recipeID == r.recipeID then n = math.max(n, 1) end
+        if n > 0 then
+            tinsert(recipes, { recipeID = r.recipeID, name = r.name, first = r.first, count = n })
+            for _, g in ipairs(r.reagents or {}) do
+                local it = items[g.itemID] or { itemID = g.itemID, need = 0, alts = g.alts }
+                it.need = it.need + g.qty * n
+                it.name = it.name or g.name or ItemName(g.itemID)
+                items[g.itemID] = it
+            end
+        end
+    end
+    if #recipes == 0 then
+        c.data.shoppingList[tier] = nil
+        return
+    end
+    local list = {}
+    for _, it in pairs(items) do tinsert(list, it) end
+    table.sort(list, function(a, b) return (a.name or "") < (b.name or "") end)
+    c.data.shoppingList[tier] = { profession = plan.profession, expansion = plan.expansion,
+                                  skill = plan.skill, max = plan.max, at = time(), recipes = recipes, items = list }
+end
+
+-- A finished craft takes one off its planned count.
+PlanCrafted = function(c, recipeID)
+    if type(c.data.planCounts) ~= "table" then return end
+    for tier, counts in pairs(c.data.planCounts) do
+        local n = type(counts) == "table" and tonumber(counts[recipeID])
+        if n and n > 0 then
+            counts[recipeID] = n > 1 and n - 1 or nil
+            BuildShopping(c, tier)
+        end
+    end
+end
+
+-- Set from the panel's - / + buttons.
+local function SetPlanCount(tier, recipeID, n)
+    local c = CharData()
+    PlanCounts(c, tier)[recipeID] = n > 0 and math.min(n, 999) or nil
+    BuildShopping(c, tier)
+    c.exportedAt = time()
+end
+
+local function ClearPlan(tier)
+    local c = CharData()
+    if type(c.data.planCounts) == "table" then c.data.planCounts[tier] = nil end
+    BuildShopping(c, tier)
+    c.exportedAt = time()
+end
+
+------------------------------------------------------------ celebration ---
+-- Celebrate(reason): a gold flash and a sound, once, when something worth
+-- cheering happens - for now, a profession tier reaching its max. Kept as
+-- one function so later satellites can share it without changing callers.
+-- Dismiss with a click; /flp celebrate turns it off.
+
+local celebrateFrame
+
+local function CelebrationSound()
+    -- whichever of these the game has (checked, not assumed)
+    for _, key in ipairs({ "UI_PROFESSIONS_NEW_RECIPE_LEARNED_TOAST", "UI_EPICLOOT_TOAST", "ACHIEVEMENT_MENU_OPEN" }) do
+        if SOUNDKIT and SOUNDKIT[key] then return SOUNDKIT[key] end
+    end
+end
+
+Celebrate = function(reason)
+    if ForgesLedgerProfessionsDB.celebrate == false then return end
+    if not celebrateFrame then
+        local f = CreateFrame("Frame", "ForgesLedgerCelebration", UIParent)
+        f:SetSize(440, 96)
+        f:SetPoint("TOP", UIParent, "TOP", 0, -150)
+        f:SetFrameStrata("DIALOG")
+        f:EnableMouse(true)
+        f:SetScript("OnMouseDown", function(self) self:Hide() end)  -- click to dismiss
+        f.flash = f:CreateTexture(nil, "BACKGROUND")
+        f.flash:SetPoint("TOPLEFT", -40, 30)
+        f.flash:SetPoint("BOTTOMRIGHT", 40, -30)
+        f.flash:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask")
+        f.flash:SetVertexColor(0.95, 0.78, 0.3, 1)
+        local bg = f:CreateTexture(nil, "BORDER")
+        bg:SetAllPoints()
+        bg:SetColorTexture(0.05, 0.05, 0.07, 0.94)
+        for _, side in ipairs({ { "TOPLEFT", "TOPRIGHT", 0, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", 0, 1 } }) do
+            local e = f:CreateTexture(nil, "ARTWORK")
+            e:SetPoint(side[1]); e:SetPoint(side[2]); e:SetHeight(1)
+            e:SetColorTexture(0.9, 0.75, 0.25, 0.9)
+        end
+        f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        f.title:SetPoint("TOP", 0, -16)
+        f.title:SetTextColor(0.95, 0.8, 0.3)
+        f.text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        f.text:SetPoint("TOP", f.title, "BOTTOM", 0, -8)
+        f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        f.hint:SetPoint("BOTTOM", 0, 8)
+        f.hint:SetTextColor(0.55, 0.55, 0.55)
+        f.hint:SetText("Click to dismiss")
+        f.anim = f.flash:CreateAnimationGroup()
+        local a1 = f.anim:CreateAnimation("Alpha")
+        a1:SetFromAlpha(0); a1:SetToAlpha(0.9); a1:SetDuration(0.25); a1:SetOrder(1)
+        local a2 = f.anim:CreateAnimation("Alpha")
+        a2:SetFromAlpha(0.9); a2:SetToAlpha(0); a2:SetDuration(1.4); a2:SetOrder(2)
+        f.anim:SetScript("OnFinished", function() f.flash:SetAlpha(0) end)
+        celebrateFrame = f
+    end
+    local f = celebrateFrame
+    f.title:SetText("Maxed!")
+    f.text:SetText(tostring(reason or ""))
+    f.flash:SetAlpha(0)
+    f:Show()
+    f.anim:Stop()
+    f.anim:Play()
+    local kit = CelebrationSound()
+    if kit then pcall(PlaySound, kit) end
+    C_Timer.After(8, function() if f:IsShown() then f:Hide() end end)
+end
+
 ---------------------------------------------------------------- events ---
 
 -- the Ledger panel (below) replaces these
 local RefreshHub, AutoOpenHub, AutoCloseHub = function() end, function() end, function() end
 
-local queued, autoOpen = false, false
+local queued, autoOpen, follow = false, false, false
 local function QueueScan()
     if queued then return end
     queued = true
-    C_Timer.After(1, function()
+    -- a short wait folds a burst of events (opening a window fires several)
+    -- into one scan; a quarter second is enough and doesn't feel slow
+    C_Timer.After(0.25, function()
         queued = false
+        if follow then  -- the window opened or switched expansion: follow it
+            follow = false
+            FollowWindowTier()
+        end
         Scan()
         if autoOpen then  -- a profession window just opened: bring the panel up with it
             autoOpen = false
@@ -259,6 +647,10 @@ pcall(frame.RegisterEvent, frame, "TRADE_SKILL_LIST_UPDATE")
 pcall(frame.RegisterEvent, frame, "SKILL_LINES_CHANGED")      -- skill went up
 pcall(frame.RegisterEvent, frame, "PLAYER_ENTERING_WORLD")    -- login vs. /reload
 pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED") -- a craft finished
+pcall(frame.RegisterEvent, frame, "TRADE_SKILL_DATA_SOURCE_CHANGED")  -- switched tier or profession
+pcall(frame.RegisterEvent, frame, "BANKFRAME_OPENED")         -- bank counts are real from now
+pcall(frame.RegisterEvent, frame, "BAG_UPDATE_DELAYED")       -- reagents gained or used
+pcall(frame.RegisterEvent, frame, "GET_ITEM_INFO_RECEIVED")   -- a reagent's name arrived
 frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "PLAYER_LOGIN" then
         C_Timer.After(5, Scan)  -- give the game a moment to load profession data
@@ -268,8 +660,14 @@ frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
         if a1 == "player" and RecordCraft(a3) then RefreshHub() end
     elseif event == "TRADE_SKILL_CLOSE" then
         AutoCloseHub()
+    elseif event == "BANKFRAME_OPENED" then
+        bankSeen = true
+        if RenderShop then RenderShop() end
+    elseif event == "BAG_UPDATE_DELAYED" or event == "GET_ITEM_INFO_RECEIVED" then
+        if RenderShop then RenderShop() end  -- only draws when the list is open
     else
         if event == "TRADE_SKILL_SHOW" then autoOpen = true end
+        if event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" then follow = true end
         QueueScan()
     end
 end)
@@ -590,10 +988,41 @@ local function GetTab(i)
     return t
 end
 
+-- Clicking an expansion row shows it in the panel. With the profession
+-- window open it also switches the window to that expansion, so its recipes
+-- can be read for the Next craft line and the shopping list. This only
+-- changes what the window shows; it never crafts or spends anything.
+local function SelectTier(tier, skillLineID)
+    if not selected then return end
+    selectedTier[selected] = tier
+    local T = C_TradeSkillUI
+    if skillLineID and ProfessionWindowShown() and CurrentTierName() ~= tier
+       and T and T.SetProfessionChildSkillLineID then
+        pcall(T.SetProfessionChildSkillLineID, skillLineID)
+        -- the same two steps the profession window's own code uses: the
+        -- call above changes which expansion the game reads, and this makes
+        -- the window redraw for it (without it the window keeps showing
+        -- the old expansion)
+        if ProfessionsFrame and ProfessionsFrame.SetProfessionInfo
+           and Professions and Professions.GetProfessionInfo then
+            local ok, info = pcall(Professions.GetProfessionInfo)
+            if ok and type(info) == "table" then
+                pcall(ProfessionsFrame.SetProfessionInfo, ProfessionsFrame, info, false)
+            end
+        end
+    end
+    Render()
+end
+
 local function GetTier(i)
     if hubTiers[i] then return hubTiers[i] end
-    local r = CreateFrame("Frame", nil, hub.zone)
+    local r = CreateFrame("Button", nil, hub.zone)
     r:SetHeight(TIER_H)
+    r.sel = Line(r, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.10)  -- the expansion being shown
+    r.sel:SetAllPoints()
+    r.hover = Line(r, "HIGHLIGHT", 1, 1, 1, 0.05)
+    r.hover:SetAllPoints()
+    r:SetScript("OnClick", function(self) SelectTier(self.tier, self.skillLineID) end)
     r.label = r:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     r.label:SetPoint("LEFT", 12, 0)
     r.track = Line(r, "ARTWORK", 0, 0, 0, 0.6)
@@ -665,6 +1094,16 @@ local function CreateHub()
     end
     local close = CreateFrame("Button", nil, hub, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", 2, 2)
+    local sb = CreateFrame("Button", nil, hub)  -- placed by Render, after the tabs
+    sb:SetSize(108, 22)
+    hub.shopBtn = sb
+    sb.bg = Line(sb, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.12)
+    sb.bg:SetAllPoints()
+    Frame(sb, 0.5)
+    local st = sb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    st:SetPoint("CENTER")
+    st:SetText("Shopping list")
+    sb:SetScript("OnClick", function() ToggleShop() end)
 
     hub.zone = CreateFrame("Frame", nil, hub)  -- tiers of the selected profession
     hub.zone:SetPoint("TOPLEFT", 12, -(12 + TAB_H + 10))
@@ -768,9 +1207,14 @@ function Render()
         hubTabs[i]:Hide()
         SetPulse(hubTabs[i].pulse, false)
     end
-    -- grow sideways if the tabs need more room than the default width
-    local width = math.max(HUB_W, x + 6)
+    -- the Shopping list button sits at the right end of the tab row, left of
+    -- the close button; the panel grows sideways when the tabs plus the
+    -- button need more room than the default width, so nothing overlaps
+    local sbW = hub.shopBtn:GetWidth()
+    local width = math.max(HUB_W, x + 6 + sbW + 34)
     hub:SetWidth(width)
+    hub.shopBtn:ClearAllPoints()
+    hub.shopBtn:SetPoint("TOPRIGHT", hub, "TOPRIGHT", -34, -12 - (TAB_H - 22) / 2)
     hub.none:SetShown(#profs == 0)
     hub.zone:SetShown(#profs > 0)
     hub.cds:SetShown(#profs > 0 or #cds > 0)
@@ -782,7 +1226,7 @@ function Render()
         for tierName, t in pairs(CharData().data.tiers) do
             if t.profession == selected then
                 tinsert(tiers, { name = t.expansion or tierName, tier = tierName, skill = t.skill or 0,
-                                 max = t.maxSkill or 0, rank = ExpansionRank(t.expansion) })
+                                 max = t.maxSkill or 0, rank = ExpansionRank(t.expansion), id = t.id })
             end
         end
         table.sort(tiers, function(a, b)
@@ -805,9 +1249,12 @@ function Render()
         for i = #tiers + 1, #hubDots do hubDots[i]:Hide() end
         -- the tier the open profession window is on gets a ">" marker
         local current = ProfessionWindowShown() and CurrentTierName()
-        local y = -28
+        local y, shownTier = RenderNext(selected, -28)
+        y = RenderPlan(selected, shownTier, y)
         for i, t in ipairs(tiers) do
             local r = GetTier(i)
+            r.tier, r.skillLineID = t.tier, t.id
+            r.sel:SetShown(t.tier == shownTier)
             r:ClearAllPoints()
             r:SetPoint("TOPLEFT", 0, y)
             r:SetPoint("RIGHT", hub.zone, "RIGHT")
@@ -944,6 +1391,408 @@ AutoCloseHub = function()
     RefreshHub()  -- drops a Fishing/Cooking tab once its window closes
 end
 
+------------------------------------------------- next craft line, shop ---
+-- The "Next craft" line at the top of a profession's tiers, and the
+-- Shopping list panel docked beside the Ledger panel.
+
+-- The recommendation to show for a profession: the tier its window is on,
+-- or else the newest tier that has one.
+local function NextFor(profession)
+    local nc = CharData().data.nextCraft
+    if type(nc) ~= "table" then nc = {} end
+    local pick = selectedTier[profession]
+    if pick then
+        if type(nc[pick]) == "table" and nc[pick].profession == profession then return nc[pick], pick end
+        -- picked, but its recipes haven't been read yet
+        return { none = ProfessionWindowShown() and "reading its recipes..."
+                 or ("open " .. tostring(profession) .. " on this expansion to read its recipes") }, pick
+    end
+    local current = ProfessionWindowShown() and CurrentTierName()
+    if current and nc[current] and nc[current].profession == profession then return nc[current], current end
+    local best, bestTier, bestRank
+    for tier, n in pairs(nc) do
+        if type(n) == "table" and n.profession == profession and n.recipeID then
+            local t = CharData().data.tiers[tier]
+            local rank = ExpansionRank(t and t.expansion)
+            if not bestRank or rank > bestRank then best, bestTier, bestRank = n, tier, rank end
+        end
+    end
+    return best, bestTier
+end
+
+RenderNext = function(profession, y)
+    if not hub.next then
+        local b = CreateFrame("Button", nil, hub.zone)
+        b:SetHeight(24)
+        b.bg = Line(b, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.08)
+        b.bg:SetAllPoints()
+        b.icon = b:CreateTexture(nil, "ARTWORK")
+        b.icon:SetSize(18, 18)
+        b.icon:SetPoint("LEFT", 8, 0)
+        b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        b.text:SetPoint("LEFT", b.icon, "RIGHT", 6, 0)
+        b.why = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.why:SetPoint("LEFT", b.text, "RIGHT", 8, 0)
+        b.why:SetTextColor(DIM[1], DIM[2], DIM[3])
+        b.flash = Pulse(b.bg, 0.3)
+        -- show the recipe in the profession window (the game's own "open
+        -- recipe" - it only navigates; the player still crafts)
+        b:SetScript("OnClick", function(self)
+            local T = C_TradeSkillUI
+            if self.recipeID and ProfessionWindowShown() and T and T.OpenRecipe then
+                pcall(T.OpenRecipe, self.recipeID)
+            end
+            self.flash:Play()
+            C_Timer.After(1.2, function() self.flash:Stop(); self.bg:SetAlpha(1) end)
+        end)
+        hub.next = b
+    end
+    local b = hub.next
+    local n, tier = NextFor(profession)
+    if not n then
+        b:Hide()
+        return y, nil
+    end
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 4, y)
+    b:SetPoint("RIGHT", hub.zone, "RIGHT", -4, 0)
+    if n.recipeID then
+        b.recipeID = n.recipeID
+        b.icon:SetTexture(n.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+        b.icon:Show()
+        b.text:SetText("Next craft: " .. tostring(n.name))
+        b.why:SetText(tostring(n.reason or ""))
+    else
+        b.recipeID = nil
+        b.icon:Hide()
+        b.text:SetText("Next craft: " .. tostring(tier or ""))
+        b.why:SetText(tostring(n.none or ""))
+    end
+    b:Show()
+    return y - 28, tier
+end
+
+-- Plan block -------------------------------------------------------------
+-- Under the Next craft line: the shown expansion's recipes that still give
+-- skill, each with a craft count you set (- / +, shift-click for 10). The
+-- colours are the game's, as of the last time the window showed that
+-- expansion. Counts feed the shopping list; a finished craft counts down.
+
+local DIFF_COLOR = { orange = { 1, 0.50, 0.25 }, yellow = { 1, 0.82, 0 }, green = { 0.25, 0.75, 0.25 },
+                     grey = { 0.55, 0.55, 0.55 } }
+local PLAN_ROWS, PLAN_ROW_H = 6, 20
+local planRows, planAll = {}, {}  -- planAll[tier]: show every row, not just the first few
+
+local function SmallButton(parent, label, w)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(w or 18, 18)
+    b.bg = Line(b, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.12)
+    b.bg:SetAllPoints()
+    b.hl = Line(b, "HIGHLIGHT", 1, 1, 1, 0.10)
+    b.hl:SetAllPoints()
+    b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    b.text:SetPoint("CENTER")
+    b.text:SetText(label)
+    return b
+end
+
+local function Step()  -- shift-click moves by 10
+    return (IsShiftKeyDown and IsShiftKeyDown()) and 10 or 1
+end
+
+local function PlanRow(i)
+    if planRows[i] then return planRows[i] end
+    local r = CreateFrame("Frame", nil, hub.zone)
+    r:SetHeight(PLAN_ROW_H)
+    r.strip = Line(r, "ARTWORK", 1, 1, 1, 0.9)  -- the recipe's colour
+    r.strip:SetPoint("TOPLEFT", 4, -2)
+    r.strip:SetPoint("BOTTOMLEFT", 4, 2)
+    r.strip:SetWidth(3)
+    r.icon = r:CreateTexture(nil, "ARTWORK")
+    r.icon:SetSize(16, 16)
+    r.icon:SetPoint("LEFT", 12, 0)
+    r.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    r.plus = SmallButton(r, "+")
+    r.plus:SetPoint("RIGHT", -6, 0)
+    r.count = r:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    r.count:SetWidth(30)
+    r.count:SetPoint("RIGHT", r.plus, "LEFT", -2, 0)
+    r.minus = SmallButton(r, "-")
+    r.minus:SetPoint("RIGHT", r.count, "LEFT", -2, 0)
+    r.tag = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.tag:SetPoint("RIGHT", r.minus, "LEFT", -8, 0)
+    r.tag:SetTextColor(DIM[1], DIM[2], DIM[3])
+    r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.name:SetPoint("LEFT", r.icon, "RIGHT", 6, 0)
+    r.name:SetPoint("RIGHT", r.tag, "LEFT", -6, 0)
+    r.name:SetJustifyH("LEFT")
+    r.name:SetWordWrap(false)
+    r.plus:SetScript("OnClick", function()
+        SetPlanCount(r.tier, r.recipeID, r.n + Step())
+        Render(); if RenderShop then RenderShop() end
+    end)
+    r.minus:SetScript("OnClick", function()
+        SetPlanCount(r.tier, r.recipeID, math.max(0, r.n - Step()))
+        Render(); if RenderShop then RenderShop() end
+    end)
+    planRows[i] = r
+    return r
+end
+
+local function PlanWidgets()
+    if hub.plan then return hub.plan end
+    local p = {}
+    p.head = hub.zone:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    p.clear = SmallButton(hub.zone, "Clear", 46)
+    p.clear:SetScript("OnClick", function(self)
+        ClearPlan(self.tier)
+        Render(); if RenderShop then RenderShop() end
+    end)
+    p.hint = hub.zone:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    p.hint:SetJustifyH("LEFT")
+    p.hint:SetTextColor(DIM[1], DIM[2], DIM[3])
+    p.more = CreateFrame("Button", nil, hub.zone)
+    p.more:SetHeight(18)
+    p.more.text = p.more:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    p.more.text:SetPoint("LEFT", 12, 0)
+    p.more.text:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    p.more:SetScript("OnClick", function(self)
+        planAll[self.tier] = not planAll[self.tier] or nil
+        Render()
+    end)
+    hub.plan = p
+    return p
+end
+
+RenderPlan = function(profession, tier, y)
+    local p = PlanWidgets()
+    local c = CharData()
+    local plan = tier and type(c.data.plan) == "table" and c.data.plan[tier]
+    if type(plan) ~= "table" or plan.profession ~= profession or type(plan.recipes) ~= "table"
+       or #plan.recipes == 0 then
+        p.head:Hide(); p.clear:Hide(); p.hint:Hide(); p.more:Hide()
+        for _, r in ipairs(planRows) do r:Hide() end
+        return y
+    end
+    local counts = type(c.data.planCounts) == "table" and type(c.data.planCounts[tier]) == "table"
+                   and c.data.planCounts[tier] or {}
+    local t = c.data.tiers[tier]
+    local skill = t and tonumber(t.skill) or plan.skill or 0
+    local max = t and tonumber(t.maxSkill) or plan.max or 0
+    local planned = 0
+    for _, r in ipairs(plan.recipes) do planned = planned + (tonumber(counts[r.recipeID]) or 0) end
+    p.head:ClearAllPoints()
+    p.head:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 12, y - 4)
+    p.head:SetText("Plan: " .. math.max(0, max - skill) .. " points to go  \194\183  "
+        .. planned .. (planned == 1 and " craft" or " crafts") .. " planned")
+    p.head:Show()
+    p.clear.tier = tier
+    p.clear:ClearAllPoints()
+    p.clear:SetPoint("TOPRIGHT", hub.zone, "TOPRIGHT", -6, y - 2)
+    p.clear:SetShown(planned > 0)
+    y = y - 24
+    local shown = planAll[tier] and #plan.recipes or math.min(#plan.recipes, PLAN_ROWS)
+    for i = 1, shown do
+        local rec, r = plan.recipes[i], PlanRow(i)
+        r.tier, r.recipeID = tier, rec.recipeID
+        r.n = tonumber(counts[rec.recipeID]) or 0
+        local col = DIFF_COLOR[rec.color] or DIFF_COLOR.grey
+        r.strip:SetColorTexture(col[1], col[2], col[3], 0.9)
+        r.icon:SetTexture(rec.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+        r.name:SetText(tostring(rec.name))
+        r.name:SetTextColor(col[1], col[2], col[3])
+        r.tag:SetText(rec.first and "first craft" or ((rec.ups or 0) > 1 and ("+" .. rec.ups .. " each") or ""))
+        r.count:SetText(tostring(r.n))
+        r.count:SetTextColor((r.n > 0 and BONE or DIM)[1], (r.n > 0 and BONE or DIM)[2], (r.n > 0 and BONE or DIM)[3])
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 0, y)
+        r:SetPoint("RIGHT", hub.zone, "RIGHT")
+        r:Show()
+        y = y - PLAN_ROW_H
+    end
+    for i = shown + 1, #planRows do planRows[i]:Hide() end
+    if #plan.recipes > PLAN_ROWS then
+        p.more.tier = tier
+        p.more.text:SetText(planAll[tier] and "Show fewer" or ("Show all " .. #plan.recipes .. " recipes"))
+        p.more:ClearAllPoints()
+        p.more:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 0, y)
+        p.more:SetPoint("RIGHT", hub.zone, "RIGHT")
+        p.more:Show()
+        y = y - 18
+    else
+        p.more:Hide()
+    end
+    -- colours are only as fresh as the last look at this expansion
+    local stale = (tonumber(plan.skill) or 0) < skill
+    local hint = planned == 0 and "Set how many of each to craft (shift-click: 10); the shopping list adds up the reagents. Orange always gives a point, yellow and green only sometimes." or nil
+    if stale then
+        hint = "Colours as of skill " .. tostring(plan.skill) .. " - open this expansion in the profession window to refresh."
+            .. (hint and ("\n" .. hint) or "")
+    end
+    if hint then
+        p.hint:ClearAllPoints()
+        p.hint:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 12, y - 2)
+        p.hint:SetPoint("RIGHT", hub.zone, "RIGHT", -12, 0)
+        p.hint:SetText(hint)
+        p.hint:Show()
+        y = y - 6 - math.max(14, math.ceil(p.hint.GetStringHeight and p.hint:GetStringHeight() or 14))
+    else
+        p.hint:Hide()
+    end
+    return y - 6
+end
+
+-- Shopping list panel ---------------------------------------------------
+
+local shop, shopRows, shopScope = nil, {}, "me"
+
+local function ShopRow(i)
+    if shopRows[i] then return shopRows[i] end
+    local r = CreateFrame("Frame", nil, shop)
+    r:SetHeight(20)
+    r.icon = r:CreateTexture(nil, "ARTWORK")
+    r.icon:SetSize(16, 16)
+    r.icon:SetPoint("LEFT", 10, 0)
+    r.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.name:SetPoint("LEFT", r.icon, "RIGHT", 6, 0)
+    r.name:SetJustifyH("LEFT")
+    r.name:SetWordWrap(false)
+    r.value = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.value:SetPoint("RIGHT", -10, 0)
+    r.name:SetPoint("RIGHT", r.value, "LEFT", -8, 0)
+    shopRows[i] = r
+    return r
+end
+
+-- {tier -> list} for this character, or every character's lists added up
+local function ShopLists()
+    local out = {}
+    local chars = shopScope == "warband" and ForgesLedgerProfessionsDB.characters or { [CharKey()] = CharData() }
+    for _, c in pairs(chars or {}) do
+        local sl = type(c) == "table" and type(c.data) == "table" and c.data.shoppingList
+        for tier, l in pairs(type(sl) == "table" and sl or {}) do
+            if type(l) == "table" and type(l.items) == "table" then
+                local o = out[tier] or { profession = l.profession, expansion = l.expansion, items = {}, recipes = 0 }
+                for _, r in ipairs(type(l.recipes) == "table" and l.recipes or {}) do
+                    o.recipes = o.recipes + (tonumber(r.count) or 1)
+                end
+                for _, it in ipairs(l.items) do
+                    local cur = o.items[it.itemID] or { itemID = it.itemID, name = it.name, need = 0,
+                                                       alts = it.alts or { it.itemID } }
+                    cur.need = cur.need + (tonumber(it.need) or 0)
+                    cur.name = cur.name or it.name
+                    o.items[it.itemID] = cur
+                end
+                out[tier] = o
+            end
+        end
+    end
+    return out
+end
+
+RenderShop = function()
+    if not (shop and shop:IsShown()) then return end
+    for _, b in ipairs(shop.scope) do b:SetAlpha(b.id == shopScope and 1 or 0.55) end
+    local lists, tiers = ShopLists(), {}
+    for tier, l in pairs(lists) do tinsert(tiers, { tier = tier, l = l, rank = ExpansionRank(l.expansion) }) end
+    table.sort(tiers, function(a, b)
+        if a.l.profession ~= b.l.profession then return tostring(a.l.profession) < tostring(b.l.profession) end
+        return a.rank > b.rank
+    end)
+    local y, i = -64, 0
+    local function row(icon, name, value, col, header)
+        i = i + 1
+        local r = ShopRow(i)
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", shop, "TOPLEFT", 0, y)
+        r:SetPoint("RIGHT", shop, "RIGHT")
+        r.icon:SetShown(icon ~= nil)
+        if icon then r.icon:SetTexture(icon) end
+        r.name:SetFontObject(header and "GameFontNormal" or "GameFontHighlightSmall")
+        r.name:ClearAllPoints()
+        r.name:SetPoint("LEFT", icon and 32 or 10, 0)
+        r.name:SetPoint("RIGHT", r.value, "LEFT", -8, 0)
+        r.name:SetText(name)
+        r.name:SetTextColor((header and GOLD or BONE)[1], (header and GOLD or BONE)[2], (header and GOLD or BONE)[3])
+        r.value:SetText(value or "")
+        local c = col or DIM
+        r.value:SetTextColor(c[1], c[2], c[3])
+        r:Show()
+        y = y - 20
+    end
+    for _, t in ipairs(tiers) do
+        row(nil, t.tier, t.l.recipes .. (t.l.recipes == 1 and " craft" or " crafts"), DIM, true)
+        local items = {}
+        for _, it in pairs(t.l.items) do tinsert(items, it) end
+        table.sort(items, function(a, b) return tostring(a.name or a.itemID) < tostring(b.name or b.itemID) end)
+        for _, it in ipairs(items) do
+            local bags, all = Have(it.alts)
+            local got = all or bags
+            local name = it.name or ItemName(it.itemID) or ("item " .. it.itemID)
+            row(ItemIcon(it.itemID), name, got .. " / " .. it.need, got >= it.need and GREEN or BONE)
+        end
+        y = y - 6
+    end
+    for j = i + 1, #shopRows do shopRows[j]:Hide() end
+    shop.empty:SetShown(#tiers == 0)
+    shop.note:ClearAllPoints()
+    shop.note:SetPoint("TOPLEFT", 10, y - 4)
+    shop.note:SetPoint("RIGHT", -10, 0)
+    shop.note:SetText((bankSeen and "Have = bags and bank." or "Have = bags only - bank unknown until you open it.")
+        .. (shopScope == "warband" and " Needs are every character's lists added up; have counts are this character's." or "")
+        .. "\nReagents for one of each recipe that still gives its first-craft bonus, plus your planned crafts (or the next craft when nothing is planned). Open a profession to update it.")
+    local noteH = shop.note.GetStringHeight and shop.note:GetStringHeight() or 28
+    shop:SetHeight(-y + 4 + math.max(28, math.ceil(noteH or 28)) + 12)
+end
+
+local function CreateShop()
+    shop = CreateFrame("Frame", "ForgesLedgerProfessionsShop", hub)
+    shop:SetWidth(330)
+    shop:SetPoint("TOPLEFT", hub, "TOPRIGHT", 6, 0)
+    local bg = Line(shop, "BACKGROUND", IRON[1], IRON[2], IRON[3], IRON[4])
+    bg:SetAllPoints()
+    Frame(shop, 0.85)
+    local title = shop:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 12, -12)
+    title:SetText("Shopping list")
+    title:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    shop.scope = {}
+    local x = 12
+    for _, s in ipairs({ { id = "me", label = "This character" }, { id = "warband", label = "Warband" } }) do
+        local b = CreateFrame("Button", nil, shop)
+        b.id = s.id
+        b:SetHeight(20)
+        b.bg = Line(b, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.12)
+        b.bg:SetAllPoints()
+        b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.text:SetPoint("CENTER")
+        b.text:SetText(s.label)
+        b:SetWidth(math.ceil(b.text:GetStringWidth()) + 20)
+        b:SetPoint("TOPLEFT", shop, "TOPLEFT", x, -38)
+        x = x + b:GetWidth() + 6
+        b:SetScript("OnClick", function(self) shopScope = self.id; RenderShop() end)
+        tinsert(shop.scope, b)
+    end
+    shop.empty = shop:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    shop.empty:SetPoint("TOPLEFT", 12, -66)
+    shop.empty:SetTextColor(DIM[1], DIM[2], DIM[3])
+    shop.empty:SetText("Nothing yet - open a profession window to build the list.")
+    shop.note = shop:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    shop.note:SetJustifyH("LEFT")
+    shop.note:SetTextColor(DIM[1], DIM[2], DIM[3])
+    shop:SetScript("OnShow", RenderShop)
+    shop:Hide()
+end
+
+ToggleShop = function()
+    if not hub then return end
+    if not shop then CreateShop() end
+    shop:SetShown(not shop:IsShown())
+    if shop:IsShown() then RenderShop() end
+end
+
 -- combat: overlays off when it starts, back on when it ends
 local hubEvents = CreateFrame("Frame")
 hubEvents:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -963,6 +1812,7 @@ end)
 RefreshHub = function()
     if hub and hub:IsShown() then
         Render()
+        if RenderShop then RenderShop() end
         AttachSecure()
     end
 end
@@ -974,7 +1824,9 @@ if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "fu
         text = function()
             local ready, waiting = Cooldowns()
             if #ready + #waiting == 0 then return "Professions" end
-            return "Professions: " .. #ready .. " ready", #ready > 0
+            -- dot and pulse while anything's ready (core v2.11+ pulses;
+            -- older cores ignore the third value)
+            return "Professions: " .. #ready .. " ready", #ready > 0, #ready > 0
         end,
         -- hover card (core v2.6+): who has something ready right now
         roster = function()
@@ -1036,6 +1888,22 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
                 or p.fishing and "switches the panel only (its spellbook spell casts your line)"
                 or "no spell found - the tab switches the panel but can't open the window"))
         end
+    elseif cmd == "celebrate" then
+        ForgesLedgerProfessionsDB.celebrate = ForgesLedgerProfessionsDB.celebrate == false
+        print(PREFIX .. "Celebration when a profession tier is maxed: " .. (ForgesLedgerProfessionsDB.celebrate == false and "off." or "on."))
+    elseif cmd == "celebrate test" then
+        local was = ForgesLedgerProfessionsDB.celebrate
+        ForgesLedgerProfessionsDB.celebrate = true
+        Celebrate("This is what maxing a profession tier looks like")
+        ForgesLedgerProfessionsDB.celebrate = was
+    elseif cmd == "next" then
+        local nc = CharData().data.nextCraft or {}
+        local any = false
+        for tier, n in pairs(nc) do
+            any = true
+            print(PREFIX .. tier .. ": " .. (n.recipeID and (tostring(n.name) .. " (" .. tostring(n.reason) .. ")") or tostring(n.none)))
+        end
+        if not any then print(PREFIX .. "No recommendation yet - open a profession window.") end
     elseif cmd == "scan" then
         Scan()
         local n = 0
@@ -1052,5 +1920,7 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
         print("  /flp panel - open the panel with profession windows, or not")
         print("  /flp tabs - list the spell each profession tab opens")
         print("  /flp scan - re-read your profession skills now")
+        print("  /flp next - list the best next craft for each tier")
+        print("  /flp celebrate - turn the 'tier maxed' celebration on or off (/flp celebrate test to see it)")
     end
 end

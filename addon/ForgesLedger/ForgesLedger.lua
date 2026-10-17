@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.10 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.11 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -22,7 +22,7 @@
 -- private table WoW hands every file of one addon.
 
 local ADDON_NAME, ns = ...
-local VERSION = "2.10"
+local VERSION = "2.11"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)

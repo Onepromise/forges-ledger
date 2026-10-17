@@ -2280,6 +2280,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div class="card scroll"><table class="matrix" id="matrix"></table></div>
   <div class="hint" id="phint"></div>
   <div id="crafts"></div>
+  <div id="shop"></div>
 </section>
 
 <section id="tab-classes" hidden>
@@ -2317,7 +2318,7 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",shopchar:"",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
@@ -2583,9 +2584,38 @@ function renderCrafts(){
     '</tbody></table></div><div class="hint">From the Forge&#39;s Ledger: Professions companion addon - crafts made with the profession window open, per play session.</div>':"";
 }
 
+/* shopping list, from the Professions companion: reagents for one of each
+   known recipe that still gives its first-craft bonus, plus the next craft,
+   per expansion tier - added up across characters. Bag counts live in game. */
+let SHOPTEXT="";
+function renderShopList(){
+  const owners=D.characters.filter(c=>c.sat&&c.sat.professions&&c.sat.professions.shoppingList&&Object.keys(c.sat.professions.shoppingList).length);
+  if(!owners.length){$("shop").innerHTML="";SHOPTEXT="";return}
+  if(ui.shopchar&&!owners.some(c=>c.key===ui.shopchar))ui.shopchar="";
+  const use=ui.shopchar?owners.filter(c=>c.key===ui.shopchar):owners;
+  const groups={};  // "profession|tier" -> {profession,tier,items:{id:{name,need}},recipes}
+  use.forEach(c=>Object.entries(c.sat.professions.shoppingList).forEach(([tier,l])=>{
+    if(!l||!Array.isArray(l.items))return;
+    const g=groups[l.profession+"|"+tier]=groups[l.profession+"|"+tier]||{profession:l.profession||"",tier,items:{},recipes:0,who:new Set()};
+    g.recipes+=(l.recipes||[]).reduce((n,r)=>n+((r&&r.count)||1),0);g.who.add(c.name);
+    l.items.forEach(it=>{const x=g.items[it.itemID]=g.items[it.itemID]||{name:it.name||("item "+it.itemID),need:0};x.need+=it.need||0;if(it.name)x.name=it.name});
+  }));
+  const list=Object.values(groups).sort((a,b)=>a.profession.localeCompare(b.profession)||a.tier.localeCompare(b.tier));
+  SHOPTEXT=list.map(g=>g.tier+"\n"+Object.values(g.items).sort((a,b)=>a.name.localeCompare(b.name)).map(x=>"  "+x.need+"x "+x.name).join("\n")).join("\n\n");
+  $("shop").innerHTML='<div class="panel-h" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">Shopping list'+
+    '<select id="shopchar" style="text-transform:none;letter-spacing:0"><option value="">All characters</option>'+
+    owners.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ui.shopchar?" selected":"")+">"+esc(c.name)+"</option>").join("")+"</select>"+
+    '<button class="btn" id="shopcopy" type="button" style="text-transform:none;letter-spacing:0;padding:4px 10px">Copy list</button>'+
+    '<span class="dim" id="shopcopied" style="text-transform:none;letter-spacing:0"></span></div>'+
+    '<div class="card"><table><tbody>'+list.map(g=>'<tr><td colspan="2"><b>'+esc(g.tier)+'</b> <span class="dim">· '+g.recipes+" craft"+(g.recipes===1?"":"s")+
+      (ui.shopchar?"":" · "+esc([...g.who].join(", ")))+"</span></td></tr>"+
+      Object.values(g.items).sort((a,b)=>a.name.localeCompare(b.name)).map(x=>'<tr><td style="padding-left:28px">'+esc(x.name)+'</td><td class="num"><b>'+x.need+"</b></td></tr>").join("")).join("")+
+    '</tbody></table></div><div class="hint">From the Forge&#39;s Ledger: Professions companion addon: the reagents for one of each recipe a character knows that still gives its first-craft bonus, plus the crafts planned in the in-game panel (or its best next craft when nothing is planned). Updated when you open a profession in game; the in-game list also counts your bags.</div>';
+}
+
 function renderProfs(){
   $("satcard").innerHTML=satelliteCard("professions");
-  renderCrafts();
+  renderCrafts();renderShopList();
   const idx=profIndex(),names=Object.keys(idx).sort();
   if(ui.prof&&ui.prof!=="__planner"&&!idx[ui.prof])ui.prof="";
   $("plansum").hidden=true;$("psecwrap").hidden=ui.prof!=="__planner";
@@ -3069,8 +3099,14 @@ document.addEventListener("click",async e=>{
   else if(el.dataset.cview){ui.cview=el.dataset.cview;render()}
   else if(el.dataset.cown){ui.cown=el.dataset.cown;render()}
 });
+document.addEventListener("click",async e=>{
+  if(e.target.id!=="shopcopy"||!SHOPTEXT)return;
+  try{await navigator.clipboard.writeText(SHOPTEXT);$("shopcopied").textContent="Copied."}
+  catch(err){$("shopcopied").textContent="Couldn't copy - select the list and copy it instead."}
+});
 document.addEventListener("change",e=>{
   const t=e.target;
+  if(t.id==="shopchar"){ui.shopchar=t.value;render();return}
   if(t.classList.contains("rolesel"))return setRole(t.dataset.key,t.value);
   if(t.classList.contains("wk"))return setWeekly(t.dataset.key,t.dataset.item,t.checked);
   const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec",repchar:"repchar",rephide:"rephide"};

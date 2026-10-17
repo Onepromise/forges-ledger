@@ -1,4 +1,4 @@
--- Forge's Ledger: the bar (part of the core addon, v2.10)
+-- Forge's Ledger: the bar (part of the core addon, v2.11)
 -- A thin bar docked to the bottom (or top) of the screen with the Ledger's
 -- numbers at a glance: an anvil launcher, then one segment per plugin -
 -- gold, Todo, Great Vault, and whatever satellites add. Click a segment for
@@ -12,7 +12,10 @@
 --       label = "Professions",      -- its name in the settings window
 --       order = 50,                 -- left-to-right; core uses 10, 20, 30
 --       text  = function()          -- the segment's text; nil or "" hides it
---           return "Professions: 1 ready", true  -- true = show the gold dot
+--           return "Professions: 1 ready", true, true
+--           -- 2nd value: show the gold dot; 3rd: pulse the segment (a
+--           -- "come back, something's ready" nudge; the player can turn
+--           -- pulsing off in the bar's Settings)
 --       end,
 --       roster  = function() return {...} end,  -- optional: hover card across
 --                                               -- characters (see ForgesLedger_Windows.lua)
@@ -72,6 +75,7 @@ local function Settings()
     if not s.anchorChosen or (s.anchor ~= "TOP" and s.anchor ~= "BOTTOM") then s.anchor = "TOP" end
     if s.align ~= "LEFT" then s.align = "CENTER" end  -- segments centered unless set to left
     if type(s.hidden) ~= "table" then s.hidden = {} end  -- segment id -> true
+    if s.pulse == nil then s.pulse = true end  -- segments may pulse when something's ready
     return s
 end
 ns.BarSettings = Settings
@@ -103,12 +107,12 @@ end
 -- plugin is skipped from then on.
 local function Call(p, fn, ...)
     if failed[p.id] or type(fn) ~= "function" then return false end
-    local ok, a, b = pcall(fn, ...)
+    local ok, a, b, c = pcall(fn, ...)
     if not ok then
         Fail(p, a)
         return false
     end
-    return true, a, b
+    return true, a, b, c
 end
 
 local function Register(def, fromCore)
@@ -244,6 +248,17 @@ local function Seg(i)
     s.divider:SetPoint("LEFT")
     s.divider:SetSize(1, 14)
     s.divider:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.3)
+    -- a gold wash that breathes across the segment when its plugin asks
+    s.glow = s:CreateTexture(nil, "BACKGROUND")
+    s.glow:SetAllPoints()
+    s.glow:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 1)
+    s.glow:SetAlpha(0)
+    s.pulse = s.glow:CreateAnimationGroup()
+    s.pulse:SetLooping("BOUNCE")
+    local pa = s.pulse:CreateAnimation("Alpha")
+    pa:SetFromAlpha(0.04)
+    pa:SetToAlpha(0.32)
+    pa:SetDuration(0.8)
     s.dot = s:CreateTexture(nil, "ARTWORK")  -- "something's ready" marker
     s.dot:SetSize(6, 6)
     s.dot:SetPoint("LEFT", PAD, 0)
@@ -299,7 +314,7 @@ function Refresh()
         local n = 0
         for _, p in ipairs(Sorted()) do
             if not hidden[p.id] then
-                local ok, text, attention = Call(p, p.text)
+                local ok, text, attention, wantPulse = Call(p, p.text)
                 if ok and text ~= nil and text ~= "" then
                     n = n + 1
                     local s = Seg(n)
@@ -309,6 +324,12 @@ function Refresh()
                     s.label:ClearAllPoints()
                     s.label:SetPoint("LEFT", inset, 0)
                     s.label:SetText(tostring(text))
+                    if wantPulse and Settings().pulse then
+                        if not s.pulse:IsPlaying() then s.pulse:Play() end
+                    elseif s.pulse:IsPlaying() then
+                        s.pulse:Stop()
+                        s.glow:SetAlpha(0)
+                    end
                     local w = math.ceil(s.label:GetStringWidth()) + inset + PAD
                     s:SetWidth(w)
                     s.x = x  -- position within the group; placed below
@@ -328,6 +349,8 @@ function Refresh()
             segs[i]:SetPoint("LEFT", bar, "LEFT", start + segs[i].x, 0)
         end
         for i = n + 1, #segs do
+            segs[i].pulse:Stop()
+            segs[i].glow:SetAlpha(0)
             segs[i]:Hide()
             segs[i].plugin = nil
         end
@@ -924,6 +947,8 @@ function SettingsLines()
         { text = "Segments " .. (s.align == "LEFT" and "on the left" or "centered"),
           right = "click to switch", rightColor = C.dim,
           onClick = function() ns.SetBarAlign(Settings().align == "LEFT" and "CENTER" or "LEFT") end },
+        { text = (s.pulse and CHECK or BOX) .. " Pulse a segment when something is ready",
+          onClick = function() Settings().pulse = not Settings().pulse; QueueRefresh() end },
         { text = "Segments", header = true },
     }
     for _, p in ipairs(Sorted()) do

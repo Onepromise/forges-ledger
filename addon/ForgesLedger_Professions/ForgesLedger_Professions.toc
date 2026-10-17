@@ -2,7 +2,7 @@
 ## Title: Forge's Ledger: Professions
 ## Notes: Your profession skill for every expansion and your cooldowns at a glance, in a panel that opens with your profession window. Optional companion to Forge's Ledger. Type /flp for options.
 ## Author: Forge at Crescent Cove
-## Version: 1.9
+## Version: 1.10
 ## X-Website: https://thecrescentcove.com/forge-ledger
 ## OptionalDeps: ForgesLedger
 ## SavedVariables: ForgesLedgerProfessionsDB
