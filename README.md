@@ -1,5 +1,7 @@
 # Forge's Ledger
 
+by **Forge at Crescent Cove** · [thecrescentcove.com/forge-ledger](https://thecrescentcove.com/forge-ledger)
+
 A desktop dashboard for World of Warcraft players that tracks every character
 on your account in one place: levels, professions across every expansion,
 known and missing recipes, class coverage, mounts, pets, achievements, and
