@@ -106,6 +106,16 @@ SATELLITES = {
         "pitch": "your keystone, Mythic+ rating, season bests and raid kills in game, plus who has which key on the bar",
         "games": ["retail"],  # Mythic+ and modern lockouts are retail-only
     },
+    # a sibling product rather than a Ledger companion: it works on its own,
+    # but installs from here and its data is read for a future dashboard page
+    "chronicle": {
+        "folder": "ForgesChronicle",
+        "db": "ForgesChronicleDB",
+        "schema": 1,
+        "title": "Forge's Chronicle",
+        "pitch": "an automatic adventure journal in game: your character's firsts and milestones, screenshots of the big moments, and a recap to share",
+        "games": ["retail", "forever"],
+    },
 }
 
 # Roles you can tag a character with on the dashboard (stored in ROLES_PATH).
@@ -3397,11 +3407,15 @@ def render_setup(error=None, notice=None, form=None):
     # optional companion addons (satellites) - each with its own button
     for sat in satellite_status(wow) if wow_ok else []:
         btn = ('<button class="btn" type="button" data-install-sat="%s">%%s</button>' % esc(sat["id"]))
+        forever_behind = any(v != sat["bundled"] for v in sat.get("forever", []))
         if not sat["installed"]:
             state = '<span class="dim">optional - not installed</span> ' + btn % "Install"
         elif sat["installed"] != sat["bundled"]:
             state = ('<span class="warn">version %s installed - %s available</span> '
                      % (esc(sat["installed"]), esc(sat["bundled"]))) + btn % "Update"
+        elif forever_behind:
+            state = ('<span class="warn">installed for Retail (version %s), not yet for Forever</span> '
+                     % esc(sat["installed"])) + btn % "Install for Forever"
         else:
             state = '<span class="ok">&#10003; installed (version %s)</span>' % esc(sat["installed"])
         addon_html += ('<div class="status" style="margin-top:12px;flex-wrap:wrap;gap:8px">'
@@ -3688,9 +3702,15 @@ def satellite_status(wow_path):
         if not os.path.isdir(bundle):
             continue  # doesn't ship with this build
         dest = os.path.join(wow_path, "_retail_", "Interface", "AddOns", sat["folder"]) if wow_path else ""
+        forever = []
+        if wow_path and "forever" in sat["games"]:
+            for client in forever_clients(wow_path):
+                fdest = os.path.join(client, "Interface", "AddOns", sat["folder"])
+                forever.append(_toc_version(fdest, sat["folder"]))
         out.append({"id": sid, "title": sat["title"], "pitch": sat["pitch"],
                     "installed": _toc_version(dest, sat["folder"]) if dest else None,
-                    "bundled": _toc_version(bundle, sat["folder"])})
+                    "bundled": _toc_version(bundle, sat["folder"]),
+                    "forever": forever})  # installed version per Forever client
     return out
 
 
@@ -3702,6 +3722,11 @@ def install_satellite(wow_path, sid):
         raise RuntimeError("unknown companion addon")
     dest = os.path.join(wow_path, "_retail_", "Interface", "AddOns", sat["folder"])
     shutil.copytree(bundle, dest, dirs_exist_ok=True)
+    # an addon that also runs in WoW Forever goes into each Forever client too
+    if "forever" in sat["games"]:
+        for client in forever_clients(wow_path):
+            shutil.copytree(bundle, os.path.join(client, "Interface", "AddOns", sat["folder"]),
+                            dirs_exist_ok=True)
     return _toc_version(dest, sat["folder"])
 
 
