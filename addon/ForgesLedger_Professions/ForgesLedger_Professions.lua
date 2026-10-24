@@ -1,4 +1,4 @@
--- Forge's Ledger: Professions v1.10 (retail)
+-- Forge's Ledger: Professions v1.11 (retail)
 -- A companion to Forge's Ledger, and useful on its own: a panel with your
 -- skill in every expansion's tier of each profession, plus your profession
 -- cooldowns, that opens with the profession window. It also records those
@@ -18,7 +18,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.10"
+local VERSION = "1.11"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 
@@ -68,6 +68,7 @@ end
 -- keeping zeros from it would fill the file with professions you don't have.
 -- set further down (next craft and shopping list, celebration, panel)
 local ScanRecipes, Celebrate = function() end, function() end
+local SnapConcentration
 local RenderNext, RenderShop, ToggleShop, RenderPlan
 local BuildShopping, PlanCrafted = function() end, function() end
 local pendingCelebrations = {}
@@ -164,6 +165,7 @@ local function Scan()
         end
     end
     RebuildCurrent(c)
+    SnapConcentration(c)  -- concentration pools, from the game
     ScanRecipes(c)  -- next craft and shopping list, with a profession window open
     c.data.lastScan = time()
     c.exportedAt = time()
@@ -264,6 +266,157 @@ local function SessionLine()
     end
     return label .. ": " .. n .. (n == 1 and " craft" or " crafts")
         .. (best and ("  \194\183  most made: " .. best .. " \195\151" .. bestN) or ""), icon
+end
+
+----------------------------------------------------------- concentration ---
+-- Concentration (Khaz Algar and Midnight crafting professions) is a pool
+-- per profession that refills over time - even while logged out - and only
+-- goes down while you craft on that character. So one reading is enough:
+-- the addon snapshots the pool whenever the game shows it (login, a
+-- profession opening or changing, the game reporting the currency changed)
+-- and works out the current amount from the time since. Both the pool's
+-- currency and its refill rate come from the game (the currency's recharge
+-- cycle); 1 point per 6 minutes - the rate measured in game - is only the
+-- fallback if the game doesn't report one.
+
+local FALLBACK_CYCLE, FALLBACK_PER = 360, 1  -- seconds per refill step, points per step
+local concCurrency = {}  -- currency IDs that are a pool: CURRENCY_DISPLAY_UPDATE re-reads only those
+
+-- Midnight's "secret values" can't be stored or compared by addons.
+local function Plain(v)
+    if v ~= nil and issecretvalue and issecretvalue(v) then return nil end
+    return v
+end
+
+-- "KhazAlgar:Alchemy": stable across sessions
+local function ConcKey(t, tierName)
+    return ((t.expansion or tierName or "?"):gsub("%s", "")) .. ":" .. tostring(t.profession)
+end
+
+SnapConcentration = function(c)
+    local T, CI = C_TradeSkillUI, C_CurrencyInfo
+    if not (T and T.GetConcentrationCurrencyID and CI and CI.GetCurrencyInfo) then return end
+    local conc = type(c.data.concentration) == "table" and c.data.concentration or {}
+    for tierName, t in pairs(c.data.tiers) do
+        if t.id and (t.skill or 0) > 0 then
+            local key = ConcKey(t, tierName)
+            local ok, cid = pcall(T.GetConcentrationCurrencyID, t.id)
+            cid = ok and Plain(cid) or nil
+            if cid == 0 then
+                conc[key] = nil  -- the game says this tier has no concentration
+            elseif type(cid) == "number" then
+                local ok2, info = pcall(CI.GetCurrencyInfo, cid)
+                local qty = ok2 and type(info) == "table" and Plain(info.quantity)
+                local max = ok2 and type(info) == "table" and Plain(info.maxQuantity)
+                if type(qty) == "number" and type(max) == "number" and max > 0 then
+                    concCurrency[cid] = true
+                    local cycle = tonumber(Plain(info.rechargingCycleDurationMS))
+                    local per = tonumber(Plain(info.rechargingAmountPerCycle))
+                    conc[key] = { amount = qty, max = max, snapshotAt = time(),
+                                  cycle = (cycle and cycle > 0) and cycle / 1000 or nil,
+                                  per = (per and per > 0) and per or nil,
+                                  currencyID = cid, profession = t.profession, expansion = t.expansion,
+                                  tier = tierName }
+                end
+            end
+            -- (a failed call keeps the last snapshot rather than losing it)
+        end
+    end
+    c.data.concentration = conc
+end
+
+-- now: projected amount, max, and when it's full (nil if full)
+local function ConcNow(e, now)
+    local cycle, per = tonumber(e.cycle) or FALLBACK_CYCLE, tonumber(e.per) or FALLBACK_PER
+    local amount, max = tonumber(e.amount) or 0, tonumber(e.max) or 0
+    local at = tonumber(e.snapshotAt) or now
+    local cur = math.min(max, amount + math.floor(math.max(0, now - at) / cycle) * per)
+    if cur >= max then return max, max, nil end
+    return cur, max, at + math.ceil((max - amount) / per) * cycle
+end
+
+-- "1d 12h" / "3h 20m" / "14m"
+local function Dur(sec)
+    sec = math.max(0, math.floor(sec or 0))
+    local d, h, m = math.floor(sec / 86400), math.floor(sec % 86400 / 3600), math.floor(sec % 3600 / 60)
+    if d > 0 then return d .. "d " .. h .. "h" end
+    if h > 0 then return h .. "h " .. m .. "m" end
+    return math.max(1, m) .. "m"
+end
+
+-- a character's pools, newest expansion per profession (conc = its saved
+-- concentration table)
+local function PoolsOf(conc)
+    local by = {}
+    for _, e in pairs(type(conc) == "table" and conc or {}) do
+        if type(e) == "table" and e.profession then
+            local cur = by[e.profession]
+            if not cur or ExpansionRank(e.expansion) > ExpansionRank(cur.expansion) then by[e.profession] = e end
+        end
+    end
+    local list, now = {}, time()
+    for prof, e in pairs(by) do
+        local cur, max, fullAt = ConcNow(e, now)
+        tinsert(list, { profession = prof, entry = e, cur = cur, max = max, fullAt = fullAt, full = fullAt == nil })
+    end
+    table.sort(list, function(a, b) return a.profession < b.profession end)
+    return list
+end
+
+-- this character's pools
+local function MyPools()
+    return PoolsOf(CharData().data.concentration)
+end
+
+-- every character on this WoW account (they share this save file; other
+-- accounts' characters live in their own files, which only the app reads).
+-- Full first, then soonest to full, then name. Projected from each
+-- character's last reading, so alts never need to be online.
+local function AllPools()
+    local out, me = {}, CharKey()
+    local coreChars = type(ForgeGoldDB) == "table" and type(ForgeGoldDB.chars) == "table" and ForgeGoldDB.chars or {}
+    for key, ch in pairs(ForgesLedgerProfessionsDB.characters or {}) do
+        local data = type(ch) == "table" and ch.data
+        if type(data) == "table" then
+            local core = type(coreChars[key]) == "table" and coreChars[key] or {}
+            for _, p in ipairs(PoolsOf(data.concentration)) do
+                p.key, p.me = key, key == me
+                p.name = core.name or tostring(key):match("^([^%-]+)") or tostring(key)
+                p.class = core.class
+                tinsert(out, p)
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.full ~= b.full then return a.full end
+        if not a.full and a.fullAt ~= b.fullAt then return a.fullAt < b.fullAt end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.profession < b.profession
+    end)
+    return out
+end
+
+-------------------------------------------------------- cooldown choices ---
+-- Every recorded cooldown is either tracked (the default: a card, the bar's
+-- ready pulse, the app) or ignored by the player. Only ignores are stored,
+-- per character, keyed by the cooldown's spell ID; the core addon keeps
+-- recording an ignored one's timer, so un-ignoring is instant and correct.
+
+local function CooldownIgnored(charKey, id)
+    local chars = ForgesLedgerProfessionsDB.characters
+    local ch = type(chars) == "table" and chars[charKey]
+    local prefs = type(ch) == "table" and type(ch.data) == "table" and ch.data.cooldownPrefs
+    return type(prefs) == "table" and tonumber(id) ~= nil and prefs[tonumber(id)] == false
+end
+
+local function SetCooldownTracked(id, tracked)
+    id = tonumber(id)
+    if not id then return end
+    local c = CharData()
+    c.data.cooldownPrefs = type(c.data.cooldownPrefs) == "table" and c.data.cooldownPrefs or {}
+    -- only ignores are stored (false); tracked is the default, so it's removed
+    if tracked then c.data.cooldownPrefs[id] = nil else c.data.cooldownPrefs[id] = false end
+    c.exportedAt = time()
 end
 
 ------------------------------------------- next craft and shopping list ---
@@ -651,6 +804,7 @@ pcall(frame.RegisterEvent, frame, "TRADE_SKILL_DATA_SOURCE_CHANGED")  -- switche
 pcall(frame.RegisterEvent, frame, "BANKFRAME_OPENED")         -- bank counts are real from now
 pcall(frame.RegisterEvent, frame, "BAG_UPDATE_DELAYED")       -- reagents gained or used
 pcall(frame.RegisterEvent, frame, "GET_ITEM_INFO_RECEIVED")   -- a reagent's name arrived
+pcall(frame.RegisterEvent, frame, "CURRENCY_DISPLAY_UPDATE")  -- a concentration pool changed
 frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "PLAYER_LOGIN" then
         C_Timer.After(5, Scan)  -- give the game a moment to load profession data
@@ -663,6 +817,8 @@ frame:SetScript("OnEvent", function(_, event, a1, a2, a3)
     elseif event == "BANKFRAME_OPENED" then
         bankSeen = true
         if RenderShop then RenderShop() end
+    elseif event == "CURRENCY_DISPLAY_UPDATE" then
+        if a1 and concCurrency[a1] then SnapConcentration(CharData()); RefreshHub() end
     elseif event == "BAG_UPDATE_DELAYED" or event == "GET_ITEM_INFO_RECEIVED" then
         if RenderShop then RenderShop() end  -- only draws when the list is open
     else
@@ -685,8 +841,8 @@ local function Cooldowns()
     if type(chars) ~= "table" then return ready, waiting end
     for key, ch in pairs(chars) do
         if type(ch) == "table" and type(ch.cooldowns) == "table" then
-            for _, cd in pairs(ch.cooldowns) do
-                if type(cd) == "table" and type(cd.readyAt) == "number" then
+            for id, cd in pairs(ch.cooldowns) do
+                if type(cd) == "table" and type(cd.readyAt) == "number" and not CooldownIgnored(key, id) then
                     tinsert(cd.readyAt <= now and ready or waiting,
                             { who = ch.name or key, class = ch.class, name = cd.name or "?",
                               profession = cd.profession, readyAt = cd.readyAt })
@@ -757,12 +913,15 @@ end
 -- countdowns) while it's open.
 
 local HUB_W, TAB_H, TIER_H, CARD_H = 470, 38, 22, 52
+local MEDIA = "Interface\\AddOns\\ForgesLedger_Professions\\Media\\"
 local IRON, GOLD, BONE, DIM, GREEN = { 0.05, 0.05, 0.07, 0.96 }, { 0.90, 0.75, 0.25 },
     { 0.92, 0.90, 0.85 }, { 0.55, 0.55, 0.55 }, { 0.30, 0.85, 0.45 }
 local DOT = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"  -- round mask, tinted gold
 local hub, ticker
 local hubTabs, hubTiers, hubDots, hubCards, secureTabs = {}, {}, {}, {}, {}
 local selected  -- profession name of the open tab
+local Render     -- draws the panel (set below)
+local editMode = false  -- the Cooldowns zone's Customize mode
 
 local function Line(parent, layer, r, g, b, a)
     local t = parent:CreateTexture(nil, layer or "BORDER")
@@ -902,7 +1061,8 @@ local function MyCooldowns()
     for id, cd in pairs(me.cooldowns) do
         if type(cd) == "table" and type(cd.readyAt) == "number" then
             tinsert(out, { id = tonumber(id), name = cd.name or "?", profession = cd.profession,
-                           readyAt = cd.readyAt, ready = cd.readyAt <= now })
+                           readyAt = cd.readyAt, ready = cd.readyAt <= now,
+                           ignored = CooldownIgnored(CharKey(), id) })
         end
     end
     table.sort(out, function(a, b)
@@ -1065,8 +1225,92 @@ local function GetCard(i)
     c.state = c:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     c.state:SetPoint("BOTTOMLEFT", c.icon, "BOTTOMRIGHT", 10, 1)
     c.pulse = Pulse(c)
+    -- Customize mode: an eye to track or ignore, and a dashed edge when ignored
+    c.dash = {}
+    for k, p in ipairs({ { "TOPLEFT", "TOPRIGHT", "h" }, { "BOTTOMLEFT", "BOTTOMRIGHT", "h" },
+                         { "TOPLEFT", "BOTTOMLEFT", "v" }, { "TOPRIGHT", "BOTTOMRIGHT", "v" } }) do
+        local t = c:CreateTexture(nil, "OVERLAY")
+        t:SetTexture(MEDIA .. "dash_" .. p[3], "REPEAT", "REPEAT")
+        t:SetVertexColor(DIM[1], DIM[2], DIM[3], 0.9)
+        t:SetPoint(p[1])
+        t:SetPoint(p[2])
+        if p[3] == "h" then t:SetHeight(1); t:SetHorizTile(true) else t:SetWidth(1); t:SetVertTile(true) end
+        t:Hide()
+        c.dash[k] = t
+    end
+    c.eye = CreateFrame("Button", nil, c)
+    c.eye:SetSize(20, 20)
+    c.eye:SetPoint("TOPRIGHT", -6, -6)
+    c.eye.tex = c.eye:CreateTexture(nil, "ARTWORK")
+    c.eye.tex:SetAllPoints()
+    c.eye:SetScript("OnClick", function(self)
+        SetCooldownTracked(self.cdId, self.ignored)
+        Render()
+        if ForgesLedger and ForgesLedger.RefreshBar then pcall(ForgesLedger.RefreshBar) end
+    end)
+    c.eye:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(self.ignored and "Ignored - click to track it again" or "Tracked - click to ignore it")
+        GameTooltip:Show()
+    end)
+    c.eye:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    c.eye:Hide()
     hubCards[i] = c
     return c
+end
+
+-- the all-characters Concentration section: one row per character x profession
+local hubConcRows = {}
+local CONC_ROW_H = 22
+local function GetConcRow(i)
+    if hubConcRows[i] then return hubConcRows[i] end
+    local r = CreateFrame("Frame", nil, hub.allConc)
+    r:SetHeight(CONC_ROW_H)
+    r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    r.name:SetPoint("LEFT", 10, 0)
+    r.name:SetWidth(110)
+    r.name:SetJustifyH("LEFT")
+    r.name:SetWordWrap(false)
+    r.prof = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.prof:SetPoint("LEFT", 124, 0)
+    r.prof:SetWidth(130)
+    r.prof:SetJustifyH("LEFT")
+    r.prof:SetWordWrap(false)
+    r.prof:SetTextColor(DIM[1], DIM[2], DIM[3])
+    r.track = Line(r, "ARTWORK", 0, 0, 0, 0.6)
+    r.track:SetSize(90, 5)
+    r.track:SetPoint("LEFT", 258, 0)
+    r.fill = Line(r, "OVERLAY", GOLD[1], GOLD[2], GOLD[3], 0.95)
+    r.fill:SetHeight(5)
+    r.fill:SetPoint("LEFT", r.track, "LEFT")
+    r.value = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    r.value:SetPoint("RIGHT", -10, 0)
+    r.pulse = Pulse(r)
+    hubConcRows[i] = r
+    return r
+end
+
+-- Customize mode: one header per profession, with Mute all / Unmute all
+local hubCdHeaders = {}
+local function GetCdHeader(i)
+    if hubCdHeaders[i] then return hubCdHeaders[i] end
+    local h = CreateFrame("Frame", nil, hub.cds)
+    h:SetHeight(20)
+    h.text = h:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    h.text:SetPoint("LEFT", 2, 0)
+    h.text:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    h.btn = CreateFrame("Button", nil, h)
+    h.btn:SetSize(90, 18)
+    h.btn:SetPoint("RIGHT", 0, 0)
+    h.btn.text = h.btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    h.btn.text:SetPoint("RIGHT")
+    h.btn:SetScript("OnClick", function(self)
+        for _, cd in ipairs(self.cds or {}) do SetCooldownTracked(cd.id, self.unmute) end
+        Render()
+        if ForgesLedger and ForgesLedger.RefreshBar then pcall(ForgesLedger.RefreshBar) end
+    end)
+    hubCdHeaders[i] = h
+    return h
 end
 
 local function CreateHub()
@@ -1134,6 +1378,48 @@ local function CreateHub()
     hub.cdEmpty = hub.cds:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hub.cdEmpty:SetPoint("TOPLEFT", 12, -32)
     hub.cdEmpty:SetTextColor(DIM[1], DIM[2], DIM[3])
+    hub.customize = CreateFrame("Button", nil, hub.cds)
+    hub.customize:SetSize(80, 18)
+    hub.customize:SetPoint("TOPRIGHT", -10, -7)
+    hub.customize.text = hub.customize:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hub.customize.text:SetPoint("RIGHT")
+    hub.customize:SetScript("OnClick", function()
+        editMode = not editMode
+        Render()
+    end)
+
+    -- concentration: one slim line under the tiers (only when there's a pool)
+    local conc = CreateFrame("Frame", nil, hub.zone)
+    conc:SetHeight(34)
+    conc.label = conc:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    conc.label:SetPoint("TOPLEFT", 12, -3)
+    conc.label:SetText("Concentration")
+    conc.value = conc:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    conc.value:SetPoint("TOPRIGHT", -12, -3)
+    conc.track = Line(conc, "ARTWORK", 0, 0, 0, 0.6)
+    conc.track:SetHeight(6)
+    conc.track:SetPoint("BOTTOMLEFT", 12, 6)
+    conc.track:SetPoint("BOTTOMRIGHT", -12, 6)
+    conc.fill = Line(conc, "OVERLAY", GOLD[1], GOLD[2], GOLD[3], 0.95)
+    conc.fill:SetHeight(6)
+    conc.fill:SetPoint("LEFT", conc.track, "LEFT")
+    conc:Hide()
+    hub.conc = conc
+
+    hub.allConc = CreateFrame("Frame", nil, hub)  -- concentration, every character
+    hub.allConc:SetPoint("RIGHT", hub, "RIGHT", -12, 0)
+    Frame(hub.allConc, 0.5)
+    local abg = Line(hub.allConc, "BACKGROUND", 0, 0, 0, 0.3)
+    abg:SetAllPoints()
+    local ah = hub.allConc:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ah:SetPoint("TOPLEFT", 10, -8)
+    ah:SetText("Concentration")
+    ah:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    local asub = hub.allConc:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    asub:SetPoint("LEFT", ah, "RIGHT", 8, 0)
+    asub:SetText("all characters - as of each one's last login")
+    asub:SetTextColor(DIM[1], DIM[2], DIM[3])
+    hub.allConc:Hide()
 
     hub.session = hub:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     hub.session:SetTextColor(BONE[1] * 0.8, BONE[2] * 0.8, BONE[3] * 0.8)
@@ -1160,16 +1446,18 @@ local function CreateHub()
     end)
     hub:SetScript("OnHide", function()
         if ticker then ticker:Cancel(); ticker = nil end
+        editMode = false
         DetachSecure()
     end)
     tinsert(UISpecialFrames, "ForgesLedgerProfessionsHub")
     hub:Hide()
 end
 
-function Render()
+Render = function()
     if not hub then return end
     local profs = PrimaryProfessions()
-    local cds = MyCooldowns()
+    local allCds, cds = MyCooldowns(), {}
+    for _, cd in ipairs(allCds) do if not cd.ignored then tinsert(cds, cd) end end
     local readyBy = {}
     for _, cd in ipairs(cds) do
         if cd.ready and cd.profession then readyBy[cd.profession] = true end
@@ -1217,7 +1505,7 @@ function Render()
     hub.shopBtn:SetPoint("TOPRIGHT", hub, "TOPRIGHT", -34, -12 - (TAB_H - 22) / 2)
     hub.none:SetShown(#profs == 0)
     hub.zone:SetShown(#profs > 0)
-    hub.cds:SetShown(#profs > 0 or #cds > 0)
+    hub.cds:SetShown(#profs > 0 or #allCds > 0)
 
     -- tiers of the selected profession, newest expansion first
     local zoneH = 0
@@ -1272,6 +1560,26 @@ function Render()
             y = y - TIER_H
         end
         for i = #tiers + 1, #hubTiers do hubTiers[i]:Hide() end
+        -- concentration for this profession's newest tier that has a pool
+        local pool
+        for _, p in ipairs(MyPools()) do if p.profession == selected then pool = p end end
+        hub.conc:SetShown(pool ~= nil)
+        if pool then
+            hub.conc:ClearAllPoints()
+            hub.conc:SetPoint("TOPLEFT", hub.zone, "TOPLEFT", 0, y - 4)
+            hub.conc:SetPoint("RIGHT", hub.zone, "RIGHT")
+            if pool.full then
+                hub.conc.value:SetText("FULL - ready to craft")
+                hub.conc.value:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+            else
+                hub.conc.value:SetText(pool.cur .. " / " .. pool.max .. "  \194\183  full in " .. Dur(pool.fullAt - time()))
+                hub.conc.value:SetTextColor(BONE[1], BONE[2], BONE[3])
+            end
+            local tw = (hub.zone:GetWidth() or 0) - 24
+            if tw <= 0 then tw = HUB_W - 48 end
+            hub.conc.fill:SetWidth(math.max(1, tw * (pool.max > 0 and pool.cur / pool.max or 0)))
+            y = y - 38
+        end
         hub.note:SetShown(#tiers == 0)
         if #tiers == 0 then
             hub.note:SetText("Open " .. tostring(selected) .. " once to record its expansion levels.")
@@ -1295,11 +1603,48 @@ function Render()
     hub.cds:SetPoint("RIGHT", hub, "RIGHT", -12, 0)
     local now = time()
     local cardW = (width - 24 - 30) / 2
-    for i, cd in ipairs(cds) do
+    if #allCds == 0 then editMode = false end
+    local show = editMode and allCds or cds
+    if editMode then
+        show = {}
+        for _, cd in ipairs(allCds) do tinsert(show, cd) end
+        table.sort(show, function(a, b)
+            if (a.profession or "") ~= (b.profession or "") then return (a.profession or "") < (b.profession or "") end
+            return a.name < b.name
+        end)
+    end
+    hub.customize:SetShown(#allCds > 0)
+    hub.customize.text:SetText(editMode and "Done" or "Customize")
+    hub.customize.text:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    local yy, colN, nHdr, lastProf = -32, 0, 0, false
+    for i, cd in ipairs(show) do
+        if editMode and cd.profession ~= lastProf then
+            if colN == 1 then yy, colN = yy - (CARD_H + 8), 0 end
+            lastProf = cd.profession
+            nHdr = nHdr + 1
+            local h = GetCdHeader(nHdr)
+            h:ClearAllPoints()
+            h:SetPoint("TOPLEFT", hub.cds, "TOPLEFT", 10, yy)
+            h:SetPoint("RIGHT", hub.cds, "RIGHT", -10, 0)
+            h.text:SetText(cd.profession or "Other")
+            local group, anyTracked = {}, false
+            for _, x in ipairs(allCds) do
+                if x.profession == cd.profession then
+                    tinsert(group, x)
+                    if not x.ignored then anyTracked = true end
+                end
+            end
+            h.btn.cds, h.btn.unmute = group, not anyTracked
+            h.btn.text:SetText(anyTracked and "Mute all" or "Unmute all")
+            h.btn.text:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+            h:Show()
+            yy = yy - 22
+        end
         local c = GetCard(i)
-        local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
+        local col = colN
         c:ClearAllPoints()
-        c:SetPoint("TOPLEFT", hub.cds, "TOPLEFT", 10 + col * (cardW + 10), -32 - row * (CARD_H + 8))
+        c:SetPoint("TOPLEFT", hub.cds, "TOPLEFT", 10 + col * (cardW + 10), yy)
+        if colN == 1 then yy, colN = yy - (CARD_H + 8), 0 else colN = 1 end
         c:SetWidth(cardW)
         c.icon:SetTexture((cd.id and SpellIcon(cd.id)) or "Interface\\Icons\\INV_Misc_QuestionMark")
         c.name:SetText(cd.name)
@@ -1311,23 +1656,66 @@ function Render()
             c.state:SetText(Countdown(cd.readyAt - now))
             c.state:SetTextColor(BONE[1], BONE[2], BONE[3])
         end
+        local lit = cd.ready and not cd.ignored
         for _, e in ipairs(c.border) do  -- a ready card gets a bright gold edge
-            e:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], cd.ready and 0.9 or 0.3)
+            e:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], cd.ignored and 0 or (lit and 0.9 or 0.3))
         end
-        SetPulse(c.pulse, cd.ready)
-        if not cd.ready then c:SetAlpha(1) end
+        for _, d in ipairs(c.dash) do d:SetShown(cd.ignored) end
+        c.eye:SetShown(editMode)
+        c.eye.cdId, c.eye.ignored = cd.id, cd.ignored
+        c.eye.tex:SetTexture(MEDIA .. (cd.ignored and "eye_closed" or "eye_open"))
+        c.eye.tex:SetVertexColor((cd.ignored and DIM or GOLD)[1], (cd.ignored and DIM or GOLD)[2], (cd.ignored and DIM or GOLD)[3], 1)
+        if cd.ignored then c.name:SetTextColor(DIM[1], DIM[2], DIM[3]) end
+        SetPulse(c.pulse, lit)
+        if not lit then c:SetAlpha(cd.ignored and 0.5 or 1) end
         c:Show()
     end
-    for i = #cds + 1, #hubCards do
+    for i = #show + 1, #hubCards do
         hubCards[i]:Hide()
         SetPulse(hubCards[i].pulse, false)
     end
-    hub.cdEmpty:SetShown(#cds == 0)
-    hub.cdEmpty:SetText("No cooldowns tracked yet - one shows up after you use it.")
-    local rows = math.ceil(#cds / 2)
-    local cdsH = #cds > 0 and (32 + rows * (CARD_H + 8) + 2) or 54
+    for i = nHdr + 1, #hubCdHeaders do hubCdHeaders[i]:Hide() end
+    if colN == 1 then yy = yy - (CARD_H + 8) end
+    hub.cdEmpty:SetShown(#show == 0)
+    hub.cdEmpty:SetText(#allCds > 0 and "All cooldowns ignored - Customize"
+        or "No cooldowns tracked yet - one shows up after you use it.")
+    local cdsH = #show > 0 and (-yy + 2) or 54
     hub.cds:SetHeight(cdsH)
     local height = top + (hub.cds:IsShown() and cdsH or 0) + 14
+    -- concentration for every character on this account (hidden until any
+    -- character has a pool)
+    local pools = AllPools()
+    hub.allConc:SetShown(#pools > 0)
+    if #pools > 0 then
+        hub.allConc:ClearAllPoints()
+        hub.allConc:SetPoint("TOPLEFT", hub, "TOPLEFT", 12, -(height - 4))
+        hub.allConc:SetPoint("RIGHT", hub, "RIGHT", -12, 0)
+        for i, p in ipairs(pools) do
+            local r = GetConcRow(i)
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", hub.allConc, "TOPLEFT", 0, -30 - (i - 1) * CONC_ROW_H)
+            r:SetPoint("RIGHT", hub.allConc, "RIGHT")
+            local cc = p.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[p.class]
+            r.name:SetText(p.name .. (p.me and " (you)" or ""))
+            r.name:SetTextColor(cc and cc.r or BONE[1], cc and cc.g or BONE[2], cc and cc.b or BONE[3])
+            r.prof:SetText(p.profession .. (p.entry.expansion and ("  \194\183  " .. p.entry.expansion) or ""))
+            r.fill:SetWidth(math.max(1, 90 * (p.max > 0 and p.cur / p.max or 0)))
+            if p.full then
+                r.value:SetText("FULL")
+                r.value:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+            else
+                r.value:SetText(p.cur .. "  \194\183  in " .. Dur(p.fullAt - now))
+                r.value:SetTextColor(BONE[1], BONE[2], BONE[3])
+            end
+            r:Show()
+        end
+        for i = #pools + 1, #hubConcRows do hubConcRows[i]:Hide() end
+        local h = 30 + #pools * CONC_ROW_H + 8
+        hub.allConc:SetHeight(h)
+        height = height + h + 6
+    else
+        for _, r in ipairs(hubConcRows) do r:Hide() end
+    end
     -- this or the last play session's crafts; hidden until there are any
     local line, icon = SessionLine()
     hub.session:SetShown(line ~= nil)
@@ -1820,13 +2208,17 @@ end
 if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "function" then
     ForgesLedger.RegisterBarPlugin({
         id = "professions", label = "Professions", order = 50,
-        updateEvents = { "TRADE_SKILL_LIST_UPDATE", "SKILL_LINES_CHANGED", "TRADE_SKILL_CLOSE" },
+        updateEvents = { "TRADE_SKILL_LIST_UPDATE", "SKILL_LINES_CHANGED", "TRADE_SKILL_CLOSE",
+                         "CURRENCY_DISPLAY_UPDATE" },
         text = function()
             local ready, waiting = Cooldowns()
-            if #ready + #waiting == 0 then return "Professions" end
-            -- dot and pulse while anything's ready (core v2.11+ pulses;
-            -- older cores ignore the third value)
-            return "Professions: " .. #ready .. " ready", #ready > 0, #ready > 0
+            local full = 0
+            for _, p in ipairs(MyPools()) do if p.full then full = full + 1 end end
+            if #ready + #waiting == 0 and full == 0 then return "Professions" end
+            -- dot and pulse while anything's ready or a pool is full (core
+            -- v2.11+ pulses; older cores ignore the third value)
+            local lit = #ready > 0 or full > 0
+            return "Professions: " .. #ready .. " ready", lit, lit
         end,
         -- hover card (core v2.6+): who has something ready right now
         roster = function()
@@ -1839,6 +2231,24 @@ if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "fu
                                         .. "  |cffe6bf40ready now|r", valueColor = { 0.92, 0.90, 0.85 } })
             end
             if #ready > 12 then tinsert(footer, "+" .. (#ready - 12) .. " more") end
+            -- concentration for every character on this account
+            local pools = AllPools()
+            if #pools > 0 then
+                if #rows == 0 then
+                    tinsert(rows, { name = #waiting > 0 and "All cooldowns used." or "No cooldowns ready." })
+                end
+                tinsert(rows, { section = "Concentration" })
+                for i, p in ipairs(pools) do
+                    if i > 10 then
+                        tinsert(footer, "+" .. (#pools - 10) .. " more pools - open the Professions panel")
+                        break
+                    end
+                    tinsert(rows, { name = p.name, class = p.class, pulse = p.full,
+                                    value = p.profession .. "  " .. (p.full and "|cffe6bf40FULL|r"
+                                        or (p.cur .. " / " .. p.max)),
+                                    valueColor = { 0.92, 0.90, 0.85 } })
+                end
+            end
             return { title = "Cooldowns ready", rows = rows, footer = footer,
                      empty = #waiting > 0 and "All cooldowns used." or "No cooldowns tracked yet." }
         end,
@@ -1904,6 +2314,24 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
             print(PREFIX .. tier .. ": " .. (n.recipeID and (tostring(n.name) .. " (" .. tostring(n.reason) .. ")") or tostring(n.none)))
         end
         if not any then print(PREFIX .. "No recommendation yet - open a profession window.") end
+    elseif cmd == "concentration" or cmd == "conc" then
+        local c = CharData()
+        SnapConcentration(c)
+        local T, CI, any = C_TradeSkillUI, C_CurrencyInfo, false
+        for tierName, t in pairs(c.data.tiers) do
+            if t.id and (t.skill or 0) > 0 and T and T.GetConcentrationCurrencyID then
+                local ok, cid = pcall(T.GetConcentrationCurrencyID, t.id)
+                if ok and type(cid) == "number" and cid > 0 then
+                    any = true
+                    local ok2, info = pcall(CI.GetCurrencyInfo, cid)
+                    info = ok2 and info or {}
+                    print(PREFIX .. tierName .. ": currency " .. cid .. ", " .. tostring(info.quantity) .. " / "
+                        .. tostring(info.maxQuantity) .. ", refills " .. tostring(info.rechargingAmountPerCycle)
+                        .. " every " .. tostring(info.rechargingCycleDurationMS) .. " ms")
+                end
+            end
+        end
+        if not any then print(PREFIX .. "No concentration found - open a Khaz Algar or Midnight profession once.") end
     elseif cmd == "scan" then
         Scan()
         local n = 0
@@ -1921,6 +2349,7 @@ SlashCmdList["FORGESLEDGERPROF"] = function(msg)
         print("  /flp tabs - list the spell each profession tab opens")
         print("  /flp scan - re-read your profession skills now")
         print("  /flp next - list the best next craft for each tier")
+        print("  /flp concentration - what the game reports for your concentration pools")
         print("  /flp celebrate - turn the 'tier maxed' celebration on or off (/flp celebrate test to see it)")
     end
 end

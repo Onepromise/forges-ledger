@@ -593,15 +593,38 @@ def _history(raw):
 
 
 def _cooldowns(raw):
-    """Profession cooldowns the addon recorded: [{name, profession, ready_at}].
-    Keys/values are checked because this comes from a user-editable file."""
+    """Profession cooldowns the addon recorded: [{id, name, profession, ready_at}].
+    The addon keys each one by its spell ID (kept, so the Professions
+    companion's per-cooldown choices can be applied). Keys/values are checked
+    because this comes from a user-editable file."""
     out = []
-    for cd in (raw.values() if isinstance(raw, dict) else raw or []):
+    items = raw.items() if isinstance(raw, dict) else ((None, cd) for cd in (raw or []))
+    for key, cd in items:
         if isinstance(cd, dict) and isinstance(cd.get("readyAt"), (int, float)):
-            out.append({"name": str(cd.get("name") or "Cooldown"),
+            try:
+                cid = int(key) if key is not None else None
+            except (TypeError, ValueError):
+                cid = None
+            out.append({"id": cid, "name": str(cd.get("name") or "Cooldown"),
                         "profession": str(cd.get("profession") or ""),
                         "ready_at": int(cd["readyAt"])})
     return sorted(out, key=lambda c: (c["profession"], c["name"]))
+
+
+def cooldown_ignores(prefs):
+    """Spell IDs a character chose to ignore in the Professions companion's
+    Customize mode ({spellID: false}; only ignores are stored)."""
+    out = set()
+    if isinstance(prefs, dict):
+        for k, v in prefs.items():
+            if v is False:
+                try:
+                    out.add(int(k))
+                except (TypeError, ValueError):
+                    pass
+    elif isinstance(prefs, list):  # a Lua table keyed 1..n reads as a list
+        out.update(i + 1 for i, v in enumerate(prefs) if v is False)
+    return out
 
 
 def load_gold(client=None):
@@ -2264,6 +2287,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
     <span class="count" id="wcount"></span>
   </div>
   <div class="card scroll"><table id="wtable"></table></div>
+  <div id="wextra"></div>
   <div class="hint">Green items are checked by the addon from what it saw in game since the reset; boxes are for you to tick. Daily ticks clear at the daily reset, weekly ticks on Tuesday (US).</div>
 </section>
 
@@ -2287,6 +2311,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   </div>
   <div id="plansum" hidden></div>
   <div id="satcard"></div>
+  <div id="conc"></div>
   <div class="card scroll"><table class="matrix" id="matrix"></table></div>
   <div class="hint" id="phint"></div>
   <div id="crafts"></div>
@@ -2328,7 +2353,7 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",shopchar:"",game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",shopchar:"",concall:false,game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
@@ -2623,9 +2648,51 @@ function renderShopList(){
     '</tbody></table></div><div class="hint">From the Forge&#39;s Ledger: Professions companion addon: the reagents for one of each recipe a character knows that still gives its first-craft bonus, plus the crafts planned in the in-game panel (or its best next craft when nothing is planned). Updated when you open a profession in game; the in-game list also counts your bags.</div>';
 }
 
+/* concentration, from the Professions companion (v1.11+): each pool's last
+   reading plus the refill rate the game reported gives today's amount -
+   one login per alt, ever. Same math as the addon. */
+const CONC_EXP=["Khaz Algar","Midnight"];  // oldest first; a name not listed counts as newest
+function concRank(x){const i=CONC_EXP.indexOf(x);return i<0?99:i}
+function concNow(e,now){
+  const cycle=+e.cycle||360,per=+e.per||1,amount=+e.amount||0,max=+e.max||0,at=+e.snapshotAt||now;
+  const cur=Math.min(max,amount+Math.floor(Math.max(0,now-at)/cycle)*per);
+  return {cur,max,fullAt:cur>=max?null:at+Math.ceil((max-amount)/per)*cycle};
+}
+function concPools(){
+  const now=Date.now()/1000,out=[];
+  D.characters.forEach(c=>{const p=c.sat&&c.sat.professions,cc=p&&p.concentration;
+    if(cc&&typeof cc==="object")Object.values(cc).forEach(e=>{if(e&&+e.max>0)out.push(Object.assign({c,e},concNow(e,now)))})});
+  return out;
+}
+function durText(s){s=Math.max(0,Math.floor(s));const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return d?d+"d "+h+"h":h?h+"h "+m+"m":Math.max(1,m)+"m"}
+function renderConc(){
+  const all=concPools();
+  if(!all.length){$("conc").innerHTML="";return}
+  const newest=Math.max(...all.map(x=>concRank(x.e.expansion))),older=all.some(x=>concRank(x.e.expansion)!==newest);
+  const now=Date.now()/1000;
+  const list=all.filter(x=>ui.concall||concRank(x.e.expansion)===newest).filter(x=>!ui.pstar||x.c.tracked)
+    .sort((a,b)=>((a.fullAt===null?0:1)-(b.fullAt===null?0:1))||((a.fullAt||0)-(b.fullAt||0))||a.c.name.localeCompare(b.c.name));
+  // characters the updated addon hasn't seen yet (no concentration reading at all)
+  const unseen=D.characters.filter(c=>c.sat&&c.sat.professions&&c.sat.professions.concentration===undefined).length;
+  const when=t=>new Date(t*1000).toLocaleString(undefined,{weekday:"short",hour:"2-digit",minute:"2-digit"});
+  $("conc").innerHTML='<div class="panel-h" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">Concentration'+
+    (older?'<label class="chk" style="text-transform:none;letter-spacing:0"><input type="checkbox" id="concall"'+(ui.concall?" checked":"")+"> Show older expansions</label>":"")+"</div>"+
+    '<div class="card scroll"><table><thead><tr><th>Character</th><th>Profession</th><th>Expansion</th><th>Pool</th><th>Full at</th></tr></thead><tbody>'+
+    list.map(x=>{const pct=x.max?Math.round(100*x.cur/x.max):0,full=x.fullAt===null;
+      return "<tr><td>"+nameHtml(x.c)+'<div class="realm faint">as of '+esc(new Date((+x.e.snapshotAt||0)*1000).toLocaleDateString())+"</div></td>"+
+        "<td>"+esc(x.e.profession||"")+'</td><td class="dim">'+esc(x.e.expansion||"")+"</td>"+
+        '<td><div class="lvl" style="min-width:170px"><div class="bar"><i style="width:'+pct+'%'+(full?";background:var(--gold)":"")+'"></i></div><span class="sk">'+x.cur+"<span>/"+x.max+"</span></span></div></td>"+
+        "<td>"+(full?'<b style="color:var(--gold)">FULL</b>':'<span title="'+esc(when(x.fullAt))+'">in '+durText(x.fullAt-now)+"</span>")+"</td></tr>"}).join("")+
+    (list.length?"":'<tr><td colspan="5" class="empty">No tracked characters with a pool here.</td></tr>')+
+    "</tbody></table></div>"+
+    (unseen?'<div class="hint">'+unseen+" character"+(unseen===1?" hasn't":"s haven't")+" been seen since the update - log them in once to start tracking.</div>":"")+
+    '<div class="hint">From the Forge&#39;s Ledger: Professions companion addon. Concentration refills even while you&#39;re logged out, so each number is worked out from that character&#39;s last reading and the refill rate the game reported.</div>';
+}
+
 function renderProfs(){
   $("satcard").innerHTML=satelliteCard("professions");
-  renderCrafts();renderShopList();
+  renderConc();renderCrafts();renderShopList();
   const idx=profIndex(),names=Object.keys(idx).sort();
   if(ui.prof&&ui.prof!=="__planner"&&!idx[ui.prof])ui.prof="";
   $("plansum").hidden=true;$("psecwrap").hidden=ui.prof!=="__planner";
@@ -3011,6 +3078,12 @@ function renderWeekly(){
     rows.map(c=>"<tr><td>"+nameHtml(c)+'<div class="realm">'+esc(c.realm)+" · "+c.level+(c.has_addon?"":" · manual only")+"</div></td>"+
       periods.map(p=>cat[p].map(it=>cell(p,c,it)).join("")).join("")+"</tr>").join("")+"</tbody>"
     :'<tbody><tr><td class="empty">No tracked characters'+(ui.wscope==="all"?"":" at "+CAP)+' yet — star (☆) characters on the Roster tab.</td></tr></tbody>';
+  const fullPools=concPools().filter(x=>x.fullAt===null).length;
+  const ign=[];D.characters.forEach(c=>(c.cooldowns_ignored||[]).forEach(cd=>ign.push({c,cd})));
+  $("wextra").innerHTML=(fullPools?'<div class="hint">Concentration: <b style="color:var(--gold)">'+fullPools+" pool"+(fullPools===1?"":"s")+" FULL</b> across your characters.</div>":"")+
+    (ign.length?'<details class="hint"><summary>'+ign.length+" cooldown"+(ign.length===1?"":"s")+" ignored</summary>"+
+      ign.sort((a,b)=>a.cd.name.localeCompare(b.cd.name)).map(x=>"<div>"+esc(x.cd.name)+' <span class="dim">· '+esc(x.c.name)+"</span></div>").join("")+
+      '<div class="faint">Chosen in game: Professions panel, Cooldowns, Customize.</div></details>':"");
   const daily=periods.includes("daily")?"daily reset in "+resetText(T.next_daily).split(" · ")[0]+" · ":"";
   $("wcount").textContent=done+" of "+total+" done · "+daily+"weekly reset in "+resetText(T.next_weekly);
 }
@@ -3117,6 +3190,7 @@ document.addEventListener("click",async e=>{
 document.addEventListener("change",e=>{
   const t=e.target;
   if(t.id==="shopchar"){ui.shopchar=t.value;render();return}
+  if(t.id==="concall"){ui.concall=t.checked;render();return}
   if(t.classList.contains("rolesel"))return setRole(t.dataset.key,t.value);
   if(t.classList.contains("wk"))return setWeekly(t.dataset.key,t.dataset.item,t.checked);
   const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec",repchar:"repchar",rephide:"rephide"};
@@ -3819,7 +3893,12 @@ def build_api_data():
         apply_live_professions(c, cache.get("synced_at", 0))
     for c in chars:
         g = gold.get(c["key"], {})
-        c["cooldowns"] = g.get("cooldowns", [])
+        # cooldowns the player ignored in game (Professions companion v1.11+)
+        # never count as ready anywhere; they're listed apart instead
+        ignored = cooldown_ignores(((c.get("sat") or {}).get("professions") or {}).get("cooldownPrefs"))
+        cds = g.get("cooldowns", [])
+        c["cooldowns"] = [cd for cd in cds if cd.get("id") not in ignored]
+        c["cooldowns_ignored"] = [cd for cd in cds if cd.get("id") in ignored]
         c["todo"] = todo_auto(c, g.get("todo"))
         c["has_addon"] = bool(g)
         # rested XP as a % of the current level's XP bar (Blizzard caps the

@@ -4,6 +4,7 @@
 ## Author: Forge at Crescent Cove
 ## Version: 1.0
 ## X-Website: https://thecrescentcove.com/forge-ledger
+## X-Curse-Project-ID: 1758161
 ## OptionalDeps: ForgesLedger
 ## SavedVariables: ForgesLedgerDungeonsDB
 ForgesLedger_Dungeons.lua

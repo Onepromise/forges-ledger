@@ -4,6 +4,7 @@
 ## Author: Forge at Crescent Cove
 ## Version: 2.11
 ## X-Website: https://thecrescentcove.com/forge-ledger
+## X-Curse-Project-ID: 1758161
 ## SavedVariables: ForgeGoldDB
 ForgesLedger.lua
 ForgesLedger_Windows.lua
