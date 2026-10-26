@@ -1,4 +1,4 @@
--- Forge's Ledger addon v2.11 (formerly Forge Gold Tracker)
+-- Forge's Ledger addon v2.12 (formerly Forge Gold Tracker)
 -- One addon for both retail (Midnight) and WoW Forever: every modern-only
 -- feature (warband bank, profession cooldowns) checks the game supports it
 -- first and quietly switches off where it doesn't.
@@ -22,7 +22,7 @@
 -- private table WoW hands every file of one addon.
 
 local ADDON_NAME, ns = ...
-local VERSION = "2.11"
+local VERSION = "2.12"
 -- The saved-data table keeps its original name on purpose: renaming it
 -- would orphan everyone's recorded gold history. (The app copies the old
 -- ForgeGoldTracker save file to this addon's new file name on install.)
@@ -458,7 +458,8 @@ end
 -- /fl sync   : save now and reload so the app updates immediately
 -- /fl cooldowns : list the open profession's cooldowns (diagnostics)
 -- /fl bar    : show/hide the bar (/fl bar top | bar bottom moves it,
---              /fl bar center | bar left aligns the segments)
+--              /fl bar center | bar left aligns the segments,
+--              /fl bar fit | bar full sets its width)
 -- /fl ledger | gold | todo | vault | prof | settings : open a window -
 --              they all work with the bar hidden
 -- /fl help   : list commands
@@ -490,6 +491,9 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
     elseif cmd == "bar center" or cmd == "bar left" then
         ns.SetBarAlign(cmd == "bar left" and "LEFT" or "CENTER")
         print(PREFIX .. "Bar segments " .. (cmd == "bar left" and "on the left." or "centered."))
+    elseif cmd == "bar fit" or cmd == "bar full" then
+        ns.SetBarWidth(cmd == "bar full" and "FULL" or "FIT")
+        print(PREFIX .. (cmd == "bar full" and "Bar stretched across the screen." or "Bar fits its segments."))
     elseif cmd == "bar top" or cmd == "bar bottom" then
         ns.SetBarAnchor(cmd == "bar top" and "TOP" or "BOTTOM")
         print(PREFIX .. "Bar moved to the " .. (cmd == "bar top" and "top." or "bottom."))
@@ -505,6 +509,7 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print("  /fl cooldowns - with a profession window open, list its cooldowns")
         print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
         print("  /fl bar center or /fl bar left - center the segments or keep them on the left")
+        print("  /fl bar fit or /fl bar full - fit the bar to its segments, or stretch it across the screen")
         print("  /fl ledger, /fl gold, /fl todo, /fl vault, /fl prof - open a window")
         print("  /fl dungeons - the Dungeons panel (with the Dungeons companion addon)")
         print("  /fl settings - bar settings")

@@ -76,6 +76,10 @@ local function Settings()
     if s.align ~= "LEFT" then s.align = "CENTER" end  -- segments centered unless set to left
     if type(s.hidden) ~= "table" then s.hidden = {} end  -- segment id -> true
     if s.pulse == nil then s.pulse = true end  -- segments may pulse when something's ready
+    -- "FIT": the bar is only as wide as its anvil and segments (the default
+    -- since v2.12 - edge to edge, it covered the minimap clock and anything
+    -- else at the screen's corners); "FULL": stretched across the screen.
+    if s.width ~= "FULL" then s.width = "FIT" end
     return s
 end
 ns.BarSettings = Settings
@@ -205,10 +209,17 @@ end
 
 local function ApplyPosition()
     if not bar then return end
-    local side = Settings().anchor
+    local s = Settings()
+    local side = s.anchor
     bar:ClearAllPoints()
-    bar:SetPoint(side .. "LEFT", UIParent, side .. "LEFT", 0, 0)
-    bar:SetPoint(side .. "RIGHT", UIParent, side .. "RIGHT", 0, 0)
+    if s.width == "FULL" then
+        bar:SetPoint(side .. "LEFT", UIParent, side .. "LEFT", 0, 0)
+        bar:SetPoint(side .. "RIGHT", UIParent, side .. "RIGHT", 0, 0)
+    elseif s.align == "LEFT" then
+        bar:SetPoint(side .. "LEFT", UIParent, side .. "LEFT", 0, 0)
+    else
+        bar:SetPoint(side, UIParent, side, 0, 0)  -- centered; Refresh sets the width
+    end
     -- the gold edge faces the game world: top edge when docked at the bottom
     local edge = side == "TOP" and "BOTTOM" or "TOP"
     bar.edge:ClearAllPoints()
@@ -218,6 +229,13 @@ end
 
 function ns.SetBarAlign(align)
     Settings().align = align == "LEFT" and "LEFT" or "CENTER"
+    ApplyPosition()
+    QueueRefresh()
+end
+
+function ns.SetBarWidth(mode)
+    Settings().width = mode == "FULL" and "FULL" or "FIT"
+    ApplyPosition()
     QueueRefresh()
 end
 
@@ -339,7 +357,11 @@ function Refresh()
             end
         end
         local start = 6
-        if settings.align == "CENTER" then
+        if settings.width ~= "FULL" then
+            -- fit: the bar is exactly the group plus a margin each side
+            local want = x + 12
+            if math.abs((bar:GetWidth() or 0) - want) > 0.5 then bar:SetWidth(want) end
+        elseif settings.align == "CENTER" then
             start = math.max(6, math.floor((bar:GetWidth() - x) / 2))
         end
         anvil:ClearAllPoints()
@@ -376,6 +398,8 @@ local function CreateMenu()
           function() ns.SetBarAnchor(Settings().anchor == "TOP" and "BOTTOM" or "TOP") end },
         { function() return Settings().align == "LEFT" and "Center the segments" or "Align segments left" end,
           function() ns.SetBarAlign(Settings().align == "LEFT" and "CENTER" or "LEFT") end },
+        { function() return Settings().width == "FULL" and "Fit the bar to its segments" or "Stretch the bar full width" end,
+          function() ns.SetBarWidth(Settings().width == "FULL" and "FIT" or "FULL") end },
         { "Settings", function() ns.OpenWindow("settings") end },
         { "Sync now (reloads UI)", function() ForgesLedger_Sync() end },
     }
@@ -947,6 +971,9 @@ function SettingsLines()
         { text = "Segments " .. (s.align == "LEFT" and "on the left" or "centered"),
           right = "click to switch", rightColor = C.dim,
           onClick = function() ns.SetBarAlign(Settings().align == "LEFT" and "CENTER" or "LEFT") end },
+        { text = s.width == "FULL" and "Bar stretched across the screen" or "Bar fits its segments",
+          right = "click to switch", rightColor = C.dim,
+          onClick = function() ns.SetBarWidth(Settings().width == "FULL" and "FIT" or "FULL") end },
         { text = (s.pulse and CHECK or BOX) .. " Pulse a segment when something is ready",
           onClick = function() Settings().pulse = not Settings().pulse; QueueRefresh() end },
         { text = "Segments", header = true },
