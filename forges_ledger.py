@@ -46,7 +46,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.16.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.17.0"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -1549,7 +1549,9 @@ def watch_addon_file():
 # flag). Offline, rate-limited, or the repo still private (GitHub answers
 # 404 without a login) all just mean "no update info": no banner, no error.
 
-UPDATE_REPO = "Onepromise/forges-ledger"
+# the public, binaries-only releases repo (the source repo is private, so
+# the update check could never see it there)
+UPDATE_REPO = "Onepromise/forges-ledger-releases"
 UPDATE_PATH = os.path.join(BASE_DIR, "update_check.json")
 UPDATE_EVERY = 86400
 

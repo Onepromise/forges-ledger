@@ -4,6 +4,5 @@
 ## Author: Forge at Crescent Cove
 ## Version: 1.2
 ## X-Website: https://thecrescentcove.com
-## X-Curse-Project-ID: 1758161
 ## SavedVariables: ForgesChronicleDB
 ForgesChronicle.lua
