@@ -1,4 +1,4 @@
--- Forge's Ledger: Dungeons v1.0 (retail)
+-- Forge's Ledger: Dungeons v1.1 (retail)
 -- A companion to Forge's Ledger, and useful on its own: your Mythic+
 -- keystone, rating, season bests and this week's runs, and which raid
 -- bosses you've killed this week on each difficulty - in a panel, and (with
@@ -19,7 +19,7 @@
 --   * no work every frame: it reads on login and when the game reports a
 --     change (a run finished, a boss died, your bags changed)
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Dungeons]|r "
 
@@ -137,6 +137,25 @@ local function ReadMythicPlus(d)
     d.mythicPlusAt = now
 end
 
+-- The Adventure Guide's data isn't there until its window has been loaded
+-- once (seen in game: "current raids in the guide: 0"). If it's missing,
+-- load it - once per session, never in combat - with the game's own loader
+-- (the same one the guide's button uses). It opens nothing on screen.
+local guideTried = false
+local function EnsureGuide()
+    local tiers = Plain(Try(EJ_GetNumTiers))
+    if type(tiers) == "number" and tiers > 0 then return true end
+    if guideTried or InCombatLockdown() then return false end
+    guideTried = true
+    if type(EncounterJournal_LoadUI) == "function" then
+        Try(EncounterJournal_LoadUI)
+    elseif C_AddOns and C_AddOns.LoadAddOn then
+        Try(C_AddOns.LoadAddOn, "Blizzard_EncounterJournal")
+    end
+    tiers = Plain(Try(EJ_GetNumTiers))
+    return type(tiers) == "number" and tiers > 0
+end
+
 -- The current raids and their bosses, from the Adventure Guide's newest
 -- tier (raids that list difficulties - the world-boss page doesn't). The
 -- guide's selected tier is put back afterwards.
@@ -144,6 +163,7 @@ local function CurrentRaids()
     if not (EJ_GetNumTiers and EJ_SelectTier and EJ_GetInstanceByIndex and EJ_GetEncounterInfoByIndex) then
         return {}
     end
+    EnsureGuide()
     local tiers = Plain(Try(EJ_GetNumTiers))
     if type(tiers) ~= "number" or tiers < 1 then return {} end
     local saved = Plain(Try(EJ_GetCurrentTier))
@@ -167,6 +187,59 @@ local function CurrentRaids()
     return raids
 end
 
+-- Every raid in the Adventure Guide, oldest tier first: { tier, tierName,
+-- name }. For the farm-list picker and for sorting old raids by expansion.
+-- It walks every tier, so it's read once per session (and only when
+-- needed); the guide's selected tier is put back afterwards.
+local catalog
+local function RaidCatalog()
+    if catalog then return catalog end
+    local out = {}
+    if not (EJ_GetNumTiers and EJ_SelectTier and EJ_GetInstanceByIndex) then return out end
+    EnsureGuide()
+    local tiers = Plain(Try(EJ_GetNumTiers))
+    if type(tiers) ~= "number" or tiers < 1 then return out end
+    local saved = Plain(Try(EJ_GetCurrentTier))
+    for t = 1, tiers do
+        Try(EJ_SelectTier, t)
+        local tierName = Plain(Try(EJ_GetTierInfo, t)) or ("Tier " .. t)
+        for i = 1, 40 do
+            local instID, name = Try(EJ_GetInstanceByIndex, i, true)
+            if not instID then break end
+            name = Plain(name)
+            -- raids that list difficulties (the world-boss page doesn't)
+            local showsDifficulty = select(9, Try(EJ_GetInstanceInfo, instID))
+            if name and showsDifficulty ~= false then
+                tinsert(out, { tier = t, tierName = tierName, name = name })
+            end
+        end
+    end
+    if type(saved) == "number" then Try(EJ_SelectTier, saved) end
+    if #out > 0 then catalog = out end
+    return out
+end
+
+-- Difficulties only old raids have (10/25/40-player sizes, and Timewalking
+-- replays): a raid locked on one of these is old for certain, guide or no
+-- guide. Current raids use the flexible Normal/Heroic/Mythic difficulties.
+-- IDs come from the game's own DifficultyUtil names.
+local function OldRaidDifficulties()
+    local ID, out = DifficultyUtil and DifficultyUtil.ID, {}
+    if type(ID) ~= "table" then return out end
+    for _, key in ipairs({ "Raid10Normal", "Raid25Normal", "Raid10Heroic", "Raid25Heroic", "Raid40", "RaidTimewalker" }) do
+        if ID[key] then out[ID[key]] = true end
+    end
+    return out
+end
+
+-- The farm list: raids starred in the Legacy tab, for every character on
+-- this account. Mirrored into each character's data so the app can read it.
+local function Farm()
+    local db = ForgesLedgerDungeonsDB
+    db.farmRaids = type(db.farmRaids) == "table" and db.farmRaids or {}
+    return db.farmRaids
+end
+
 -- The four raid difficulties, from the game's own constants and names.
 local function RaidDifficulties()
     local ID = DifficultyUtil and DifficultyUtil.ID
@@ -184,23 +257,56 @@ end
 -- plus Raid Finder wings, which the lockout list doesn't include.
 local function ReadRaids(d)
     local kills, now = {}, time()
+    local db = ForgesLedgerDungeonsDB
+    -- The current expansion's raids, from the guide's newest tier, are kept
+    -- in the save file: "legacy" means any raid NOT in this list, so when a
+    -- new tier ships, last expansion's raids become legacy on their own.
+    local cur = CurrentRaids()
+    if #cur > 0 then
+        local names = {}
+        for _, r in ipairs(cur) do tinsert(names, r.name) end
+        db.currentRaids = names
+    end
+    local current = {}
+    for _, n in ipairs(type(db.currentRaids) == "table" and db.currentRaids or {}) do current[n] = true end
+    local known, legacy = next(current) ~= nil, {}
+    local oldDiff = OldRaidDifficulties()
     if GetNumSavedInstances and GetSavedInstanceInfo and GetSavedInstanceEncounterInfo then
         local n = Plain(Try(GetNumSavedInstances)) or 0
         for i = 1, n do
-            local name, _, reset, diffID, _, _, _, isRaid, _, diffName, numEnc = Try(GetSavedInstanceInfo, i)
+            local name, _, reset, diffID, _, _, _, isRaid, _, diffName, numEnc, progress, _, instanceID =
+                Try(GetSavedInstanceInfo, i)
             name, reset, diffName = Plain(name), Plain(reset), Plain(diffName)
             if name and isRaid and type(reset) == "number" and reset > 0 then
-                local bosses = {}
+                local bosses, list, down = {}, {}, 0
                 for e = 1, (tonumber(Plain(numEnc)) or 0) do
                     local boss, _, killed = Try(GetSavedInstanceEncounterInfo, i, e)
                     boss = Plain(boss)
-                    if boss and killed then bosses[boss] = true end
+                    if boss and killed then bosses[boss] = true; down = down + 1 end
+                    if boss then tinsert(list, { name = boss, killed = killed and true or false }) end
                 end
                 kills[name] = kills[name] or {}
                 kills[name][diffName or tostring(diffID)] = { id = Plain(diffID), resetAt = now + reset, bosses = bosses }
+                if (known and not current[name]) or oldDiff[Plain(diffID)] then
+                    tinsert(legacy, { name = name, instanceID = Plain(instanceID), difficultyID = Plain(diffID),
+                                      difficultyName = diffName, isRaid = true, expiresAt = now + reset,
+                                      numEncounters = tonumber(Plain(numEnc)) or #list,
+                                      encounterProgress = tonumber(Plain(progress)) or down, bosses = list })
+                end
             end
         end
     end
+    -- old raids run this week. Without the guide only the certain ones (old
+    -- difficulties) are known, and the list says it's partial; with neither,
+    -- nothing is guessed.
+    if known or #legacy > 0 then
+        d.legacyLockouts = legacy
+        d.legacyPartial = not known or nil
+        if #legacy > 0 then d.lastLegacyAt = now end
+    end
+    local copy = {}
+    for k, v in pairs(Farm()) do if v then copy[k] = true end end
+    d.farmRaids = copy
     -- Raid Finder: each wing reports its bosses as killed or not; a boss is
     -- filed under the current raid that lists it
     local lfr
@@ -209,7 +315,7 @@ local function ReadRaids(d)
     end
     if lfr and GetNumRFDungeons and GetRFDungeonInfo and GetLFGDungeonNumEncounters and GetLFGDungeonEncounterInfo then
         local raidOf = {}
-        for _, raid in ipairs(CurrentRaids()) do
+        for _, raid in ipairs(cur) do
             for _, boss in ipairs(raid.bosses) do raidOf[boss] = raid.name end
         end
         local resetAt = WeekStart() + 7 * 86400
@@ -258,6 +364,7 @@ end
 -- works in combat. Draggable; its position is saved.
 
 local W, PADDING, CELL_H, BOSS_H = 480, 12, 50, 22
+local MEDIA = "Interface\\AddOns\\ForgesLedger_Dungeons\\Media\\"
 local IRON, GOLD, BONE, DIM, GREEN = { 0.05, 0.05, 0.07, 0.96 }, { 0.90, 0.75, 0.25 },
     { 0.92, 0.90, 0.85 }, { 0.55, 0.55, 0.55 }, { 0.30, 0.85, 0.45 }
 local CHECK = "Interface\\RaidFrame\\ReadyCheck-Ready"
@@ -367,6 +474,73 @@ local function GetHead(i)  -- raid name / column labels
     return h
 end
 
+-- Legacy tab: one row per old raid (a star, the raid, difficulty, bosses,
+-- reset), and the farm-list picker (every older raid in the guide, one
+-- expansion at a time).
+local legacyRows, pickMode, pickTier = {}, false, nil
+
+local function TextBtn(parent, label)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(140, 20)
+    b.text = Text(b, "GameFontHighlightSmall", GOLD)
+    b.text:SetPoint("LEFT")
+    b.text:SetText(label)
+    b:SetScript("OnEnter", function(self) self.text:SetTextColor(1, 1, 1) end)
+    b:SetScript("OnLeave", function(self) self.text:SetTextColor(GOLD[1], GOLD[2], GOLD[3]) end)
+    return b
+end
+
+local function GetLegacyRow(i)
+    if legacyRows[i] then return legacyRows[i] end
+    local r = CreateFrame("Frame", nil, panel.body)
+    r:SetHeight(BOSS_H)
+    r.sep = Tex(r, "ARTWORK", GOLD[1], GOLD[2], GOLD[3], 0.08)
+    r.sep:SetPoint("TOPLEFT"); r.sep:SetPoint("TOPRIGHT"); r.sep:SetHeight(1)
+    r.star = CreateFrame("Button", nil, r)
+    r.star:SetSize(16, 16)
+    r.star:SetPoint("LEFT", 6, 0)
+    r.star.tex = r.star:CreateTexture(nil, "ARTWORK")
+    r.star.tex:SetAllPoints()
+    r.star:SetScript("OnClick", function(self)
+        local farm = Farm()
+        farm[self.raid] = not farm[self.raid] or nil
+        local d = CharData().data
+        local copy = {}
+        for k in pairs(farm) do copy[k] = true end
+        d.farmRaids = copy
+        Render()
+    end)
+    r.star:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(Farm()[self.raid] and "On your farm list - click to remove" or "Add to your farm list")
+        GameTooltip:Show()
+    end)
+    r.star:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    r.name = Text(r, "GameFontHighlight", BONE)
+    r.name:SetPoint("LEFT", 30, 0)
+    r.name:SetWidth(200)
+    r.name:SetJustifyH("LEFT")
+    r.name:SetWordWrap(false)
+    r.diff = Text(r, "GameFontHighlightSmall", DIM)
+    r.diff:SetPoint("LEFT", 234, 0)
+    r.diff:SetWidth(96)
+    r.diff:SetJustifyH("LEFT")
+    r.diff:SetWordWrap(false)
+    r.prog = Text(r, "GameFontHighlight", BONE)
+    r.prog:SetPoint("LEFT", 334, 0)
+    r.reset = Text(r, "GameFontHighlightSmall", DIM)
+    r.reset:SetPoint("RIGHT", -6, 0)
+    legacyRows[i] = r
+    return r
+end
+
+local function SetStar(r, raid)
+    r.star.raid = raid
+    local on = Farm()[raid] == true
+    r.star.tex:SetTexture(MEDIA .. (on and "star_on" or "star_off"))
+    r.star.tex:SetVertexColor((on and GOLD or DIM)[1], (on and GOLD or DIM)[2], (on and GOLD or DIM)[3], 1)
+end
+
 local function CreatePanel()
     panel = CreateFrame("Frame", "ForgesLedgerDungeonsPanel", UIParent)
     panel:SetWidth(W)
@@ -408,7 +582,38 @@ local function CreatePanel()
     else
         panel:SetPoint("CENTER", UIParent, "CENTER", 0, 60)
     end
-    tab = ForgesLedgerDungeonsDB.panelTab == "raids" and "raids" or "mplus"
+    local saved = ForgesLedgerDungeonsDB.panelTab
+    tab = (saved == "raids" or saved == "legacy") and saved or "mplus"
+    -- the Raids tab's way in to old raids (the Legacy tab only shows up
+    -- once there's something on it)
+    panel.legacyLink = TextBtn(panel.body, "Old raids and farm list")
+    panel.legacyLink:SetScript("OnClick", function()
+        tab, pickMode = "legacy", false
+        ForgesLedgerDungeonsDB.panelTab = tab
+        Render()
+    end)
+    panel.legacyLink:Hide()
+    panel.pickBtn = TextBtn(panel.body, "Edit farm list")
+    panel.pickBtn:SetScript("OnClick", function()
+        pickMode = not pickMode
+        Render()
+    end)
+    panel.pickBtn:Hide()
+    panel.nav = CreateFrame("Frame", nil, panel.body)
+    panel.nav:SetHeight(24)
+    panel.nav.prev = TextBtn(panel.nav, "<  older")
+    panel.nav.prev:SetSize(70, 20)
+    panel.nav.prev:SetPoint("LEFT", 4, 0)
+    panel.nav.prev:SetScript("OnClick", function() pickTier = (pickTier or 2) - 1; Render() end)
+    panel.nav.next = TextBtn(panel.nav, "newer  >")
+    panel.nav.next:SetSize(70, 20)
+    panel.nav.next:SetPoint("RIGHT", -4, 0)
+    panel.nav.next.text:ClearAllPoints()
+    panel.nav.next.text:SetPoint("RIGHT")
+    panel.nav.next:SetScript("OnClick", function() pickTier = (pickTier or 0) + 1; Render() end)
+    panel.nav.label = Text(panel.nav, "GameFontNormal", GOLD)
+    panel.nav.label:SetPoint("CENTER")
+    panel.nav:Hide()
     tinsert(UISpecialFrames, "ForgesLedgerDungeonsPanel")
     panel:Hide()
 end
@@ -559,12 +764,166 @@ local function RenderRaids(d)
     return -y
 end
 
+-- old raids this week, and starred raids not run yet
+local function RenderLegacy(d)
+    local now = time()
+    local farm = Farm()
+    local order = {}
+    for _, r in ipairs(RaidCatalog()) do order[r.name] = r.tier end
+    if pickMode then
+        -- the farm-list picker: one expansion of older raids at a time
+        local current = {}
+        for _, n in ipairs(type(ForgesLedgerDungeonsDB.currentRaids) == "table" and ForgesLedgerDungeonsDB.currentRaids or {}) do current[n] = true end
+        local byTier, tiers = {}, {}
+        for _, r in ipairs(RaidCatalog()) do
+            if not current[r.name] then
+                if not byTier[r.tier] then byTier[r.tier] = { name = r.tierName, raids = {} }; tinsert(tiers, r.tier) end
+                tinsert(byTier[r.tier].raids, r.name)
+            end
+        end
+        panel.head1:SetText("Farm list")
+        panel.head1:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+        panel.head2:SetText("Star the old raids you farm. Starred raids show on the Legacy tab every week.")
+        panel.head3:SetText("")
+        if #tiers == 0 then
+            panel.note:SetText("The raid list appears once the Adventure Guide has loaded.")
+            panel.note:ClearAllPoints()
+            panel.note:SetPoint("TOPLEFT", 4, -4)
+            panel.note:Show()
+            panel.pickBtn:ClearAllPoints()
+            panel.pickBtn:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 4, -26)
+            panel.pickBtn.text:SetText("Done")
+            panel.pickBtn:Show()
+            return 50
+        end
+        local idx = 1
+        for i, t in ipairs(tiers) do if t == pickTier then idx = i end end
+        if not byTier[pickTier or -1] then idx = #tiers end
+        pickTier = tiers[idx]
+        panel.nav:ClearAllPoints()
+        panel.nav:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 0, 0)
+        panel.nav:SetPoint("RIGHT", panel.body, "RIGHT")
+        panel.nav.label:SetText(byTier[pickTier].name)
+        panel.nav.prev:SetShown(idx > 1)
+        panel.nav.prev:SetScript("OnClick", function() pickTier = tiers[idx - 1]; Render() end)
+        panel.nav.next:SetShown(idx < #tiers)
+        panel.nav.next:SetScript("OnClick", function() pickTier = tiers[idx + 1]; Render() end)
+        panel.nav:Show()
+        local y = -28
+        for i, name in ipairs(byTier[pickTier].raids) do
+            local r = GetLegacyRow(i)
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 0, y)
+            r:SetPoint("RIGHT", panel.body, "RIGHT")
+            SetStar(r, name)
+            r.name:SetText(name)
+            r.name:SetTextColor(BONE[1], BONE[2], BONE[3])
+            r.diff:SetText(""); r.prog:SetText(""); r.reset:SetText("")
+            r:Show()
+            y = y - BOSS_H
+        end
+        for i = #byTier[pickTier].raids + 1, #legacyRows do legacyRows[i]:Hide() end
+        panel.pickBtn:ClearAllPoints()
+        panel.pickBtn:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 4, y - 6)
+        panel.pickBtn.text:SetText("Done")
+        panel.pickBtn:Show()
+        return -y + 30
+    end
+    panel.head1:SetText("Old raids this week")
+    panel.head1:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+    panel.head2:SetText("Resets " .. date("%a %H:%M", WeekStart() + 7 * 86400))
+    panel.head3:SetText(d.legacyPartial and "Newer old raids appear once the Adventure Guide has loaded."
+        or "Star a raid to keep it on your farm list.")
+    if type(d.legacyLockouts) ~= "table" then
+        panel.note:SetText("Old raids appear once the Adventure Guide has loaded.")
+        panel.note:ClearAllPoints()
+        panel.note:SetPoint("TOPLEFT", 4, -4)
+        panel.note:Show()
+        return 24
+    end
+    -- this week's old-raid lockouts (still running), then starred raids not run yet
+    local list, seen = {}, {}
+    for _, l in ipairs(d.legacyLockouts) do
+        if type(l) == "table" and (tonumber(l.expiresAt) or 0) > now then
+            tinsert(list, l)
+            seen[l.name] = true
+        end
+    end
+    table.sort(list, function(a, b)
+        local ta, tb = order[a.name] or 0, order[b.name] or 0
+        if ta ~= tb then return ta > tb end  -- newest expansion first
+        if a.name ~= b.name then return a.name < b.name end
+        return tostring(a.difficultyName) < tostring(b.difficultyName)
+    end)
+    local waiting = {}
+    for name in pairs(farm) do if not seen[name] then tinsert(waiting, name) end end
+    table.sort(waiting, function(a, b)
+        local ta, tb = order[a] or 0, order[b] or 0
+        if ta ~= tb then return ta > tb end
+        return a < b
+    end)
+    local y, i = 0, 0
+    for _, l in ipairs(list) do
+        i = i + 1
+        local r = GetLegacyRow(i)
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 0, y)
+        r:SetPoint("RIGHT", panel.body, "RIGHT")
+        SetStar(r, l.name)
+        r.name:SetText(l.name)
+        r.name:SetTextColor(BONE[1], BONE[2], BONE[3])
+        r.diff:SetText(tostring(l.difficultyName or ""))
+        local done = (tonumber(l.encounterProgress) or 0) >= (tonumber(l.numEncounters) or 1)
+        r.prog:SetText((l.encounterProgress or 0) .. " / " .. (l.numEncounters or "?"))
+        r.prog:SetTextColor((done and GOLD or BONE)[1], (done and GOLD or BONE)[2], (done and GOLD or BONE)[3])
+        r.reset:SetText("")
+        r:Show()
+        y = y - BOSS_H
+    end
+    for _, name in ipairs(waiting) do
+        i = i + 1
+        local r = GetLegacyRow(i)
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 0, y)
+        r:SetPoint("RIGHT", panel.body, "RIGHT")
+        SetStar(r, name)
+        r.name:SetText(name)
+        r.name:SetTextColor(DIM[1], DIM[2], DIM[3])
+        r.diff:SetText("- not run yet")
+        r.prog:SetText("")
+        r.reset:SetText("")
+        r:Show()
+        y = y - BOSS_H
+    end
+    for j = i + 1, #legacyRows do legacyRows[j]:Hide() end
+    if i == 0 then
+        panel.note:SetText("No old raids run this week - star some in your farm list to track them.")
+        panel.note:ClearAllPoints()
+        panel.note:SetPoint("TOPLEFT", 4, -4)
+        panel.note:Show()
+        y = -24
+    end
+    panel.pickBtn:ClearAllPoints()
+    panel.pickBtn:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 4, y - 6)
+    panel.pickBtn.text:SetText("Edit farm list")
+    panel.pickBtn:Show()
+    return -y + 30
+end
+
 function Render()
     if not panel then return end
     local d = CharData().data
-    -- tabs
+    -- tabs (Legacy only once there's something on it: an old raid this week
+    -- or a starred raid)
+    local hasLegacy = next(Farm()) ~= nil
+    for _, l in ipairs(type(d.legacyLockouts) == "table" and d.legacyLockouts or {}) do
+        if type(l) == "table" and (tonumber(l.expiresAt) or 0) > time() then hasLegacy = true end
+    end
+    if tab == "legacy" and not hasLegacy and not pickMode then hasLegacy = true end  -- opened from the link
     local defs = { { id = "mplus", label = "Mythic+" }, { id = "raids", label = "Raids" } }
+    if hasLegacy then tinsert(defs, { id = "legacy", label = "Legacy" }) end
     local x = PADDING
+    for i = #defs + 1, #tabs do tabs[i]:Hide() end
     for i, def in ipairs(defs) do
         local t = GetTab(i)
         t.id = def.id
@@ -588,12 +947,25 @@ function Render()
     panel.head2:ClearAllPoints(); panel.head2:SetPoint("TOPLEFT", PADDING + 2, y - 18)
     panel.head3:ClearAllPoints(); panel.head3:SetPoint("TOPLEFT", PADDING + 2, y - 34)
     -- body
-    HideAll(cells); HideAll(rows); HideAll(heads)
-    local bodyTop = tab == "mplus" and (y - 56) or (y - 22)
+    HideAll(cells); HideAll(rows); HideAll(heads); HideAll(legacyRows)
+    panel.legacyLink:Hide(); panel.pickBtn:Hide(); panel.nav:Hide(); panel.note:Hide()
+    if tab ~= "legacy" then pickMode = false end
+    local bodyTop = tab == "raids" and (y - 22) or (y - 56)
     panel.body:ClearAllPoints()
     panel.body:SetPoint("TOPLEFT", panel, "TOPLEFT", PADDING, bodyTop)
     panel.body:SetPoint("RIGHT", panel, "RIGHT", -PADDING, 0)
-    local h = tab == "mplus" and RenderMythicPlus(d) or RenderRaids(d)
+    local h
+    if tab == "mplus" then
+        h = RenderMythicPlus(d)
+    elseif tab == "legacy" then
+        h = RenderLegacy(d)
+    else
+        h = RenderRaids(d)
+        panel.legacyLink:ClearAllPoints()
+        panel.legacyLink:SetPoint("TOPLEFT", panel.body, "TOPLEFT", 4, -h - 2)
+        panel.legacyLink:Show()
+        h = h + 24
+    end
     panel.body:SetHeight(math.max(1, h))
     -- honest about when this was read
     local at = tab == "mplus" and d.mythicPlusAt or d.raidsAt
@@ -765,6 +1137,19 @@ SlashCmdList["FORGESLEDGERDUNGEONS"] = function(msg)
         tab = cmd
         ForgesLedgerDungeonsDB.panelTab = tab
         ShowPanel()
+    elseif cmd == "legacy" then
+        local n = Plain(Try(GetNumSavedInstances)) or 0
+        print(PREFIX .. n .. " saved instances. Current raids: " .. table.concat(ForgesLedgerDungeonsDB.currentRaids or {}, ", "))
+        for i = 1, n do
+            local name, _, reset, diffID, _, _, _, isRaid, _, diffName, numEnc, progress, _, instanceID = Try(GetSavedInstanceInfo, i)
+            print("  " .. tostring(name) .. " | " .. tostring(diffName) .. " (" .. tostring(diffID) .. ") | raid "
+                .. tostring(isRaid) .. " | " .. tostring(progress) .. "/" .. tostring(numEnc) .. " | resets in "
+                .. tostring(reset) .. "s | instance " .. tostring(instanceID))
+        end
+    elseif cmd == "farm" then
+        tab, pickMode = "legacy", true
+        ForgesLedgerDungeonsDB.panelTab = tab
+        ShowPanel()
     elseif cmd == "scan" then
         ReadAll()
         local d = CharData().data
@@ -781,6 +1166,8 @@ SlashCmdList["FORGESLEDGERDUNGEONS"] = function(msg)
         print(PREFIX .. "v" .. VERSION .. " commands:")
         print("  /fld - open or close the panel")
         print("  /fld mplus, /fld raids - open on that tab")
+        print("  /fld farm - choose the old raids you farm")
+        print("  /fld legacy - list this week's lockouts as the game reports them")
         print("  /fld scan - re-read from the game and print what was found")
     end
 end

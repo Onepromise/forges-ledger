@@ -2300,6 +2300,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div class="stats" id="dstats" style="margin-top:4px"></div>
   <div class="card scroll"><table id="dtable"></table></div>
   <div class="hint">From the Forge&#39;s Ledger: Dungeons companion addon, as of each character&#39;s last login. A keystone or run from before this week&#39;s reset (Tuesday, US) isn&#39;t shown as this week&#39;s. Raid kills count bosses killed on each difficulty this week.</div>
+  <div id="legacy"></div>
 </section>
 
 <section id="tab-profs" hidden>
@@ -2574,9 +2575,47 @@ function dungInfo(c){
   });
   return {d,key,runs,dungeons:dungeons.length,timed,best,raids,rating:d.mythicPlusRating,at:d.mythicPlusAt||d.keystoneAt||0};
 }
+/* legacy raids, from the Dungeons companion (v1.1+): the old raids each
+   character ran this week, and the farm list starred in game. A lockout
+   whose reset time has passed is open again - that needs no login. */
+function renderLegacy(){
+  const now=Date.now()/1000,month=now-28*86400;
+  const chars=D.characters.filter(c=>c.sat&&c.sat.dungeons);
+  // the farm list is account-wide in game; each character carries a copy -
+  // use the most recently read one
+  let farm={},farmAt=-1;
+  chars.forEach(c=>{const d=c.sat.dungeons;
+    if(d.farmRaids&&!Array.isArray(d.farmRaids)&&(d.raidsAt||0)>farmAt){farm=d.farmRaids;farmAt=d.raidsAt||0}
+    else if(Array.isArray(d.farmRaids)&&(d.raidsAt||0)>farmAt){farm={};farmAt=d.raidsAt||0}});
+  const starred=Object.keys(farm).filter(k=>farm[k]).sort((a,b)=>a.localeCompare(b));
+  const live=c=>(Array.isArray(c.sat.dungeons.legacyLockouts)?c.sat.dungeons.legacyLockouts:[]).filter(l=>l&&(+l.expiresAt||0)>now);
+  const cols=chars.filter(c=>live(c).length||(+c.sat.dungeons.lastLegacyAt||0)>=month).sort((a,b)=>a.name.localeCompare(b.name));
+  const also=[];cols.forEach(c=>live(c).forEach(l=>{if(!farm[l.name])also.push({c,l})}));
+  if(!starred.length&&!also.length){$("legacy").innerHTML="";return}
+  const frac=l=>(+l.numEncounters||0)?(+l.encounterProgress||0)/(+l.numEncounters):0;
+  const prog=l=>(+l.encounterProgress||0)+"/"+(+l.numEncounters||"?");
+  const cell=(c,raid)=>{const ls=live(c).filter(l=>l.name===raid);
+    if(!ls.length)return '<td class="tc"><span class="faint">·</span></td>';
+    const best=ls.slice().sort((a,b)=>frac(b)-frac(a))[0],done=frac(best)>=1;
+    return '<td class="tc" title="'+esc(ls.map(l=>(l.difficultyName||"")+": "+prog(l)).join(" · "))+'">'+
+      (done?'<b style="color:var(--gold)">✓ '+prog(best)+"</b>":prog(best))+"</td>"};
+  const reset=D.todo&&D.todo.next_weekly?' <span class="dim" style="text-transform:none;letter-spacing:0">· resets in '+durText(D.todo.next_weekly-now)+"</span>":"";
+  let html='<div class="panel-h">Legacy raids'+reset+"</div>";
+  if(starred.length){
+    html+='<div class="card scroll"><table><thead><tr><th>Farm list</th>'+(cols.length?cols.map(c=>'<th class="tc">'+nameHtml(c)+"</th>").join(""):"<th></th>")+"</tr></thead><tbody>"+
+      starred.map(r=>"<tr><td><b>"+esc(r)+"</b></td>"+(cols.length?cols.map(c=>cell(c,r)).join(""):'<td class="faint">No character has run an old raid in the last 4 weeks.</td>')+"</tr>").join("")+
+      "</tbody></table></div>";
+  }
+  if(also.length)html+='<div class="hint">Also ran this week: '+also.map(x=>esc(x.l.name)+" ("+esc(x.c.name)+" "+prog(x.l)+")").join(", ")+"</div>";
+  html+='<div class="hint">From the Forge&#39;s Ledger: Dungeons companion addon. '+(starred.length?"":"No farm list yet - ")+
+    "Star the old raids you farm in game: Dungeons panel, Legacy, Edit farm list (or /fld farm). Characters who ran an old raid in the last 4 weeks get a column.</div>";
+  $("legacy").innerHTML=html;
+}
+
 function renderDungeons(){
   document.querySelectorAll("#dscope button").forEach(b=>b.classList.toggle("on",b.dataset.dscope===ui.dscope));
   $("dsatcard").innerHTML=satelliteCard("dungeons");
+  renderLegacy();
   const rows=D.characters.map(c=>({c,i:dungInfo(c)})).filter(r=>r.i&&(ui.dscope==="all"||r.c.tracked))
     .sort((a,b)=>((b.i.key?b.i.key.level:0)-(a.i.key?a.i.key.level:0))||((b.i.rating||0)-(a.i.rating||0))||a.c.name.localeCompare(b.c.name));
   $("dcount").textContent=rows.length+" character"+(rows.length===1?"":"s");
