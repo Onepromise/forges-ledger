@@ -59,6 +59,37 @@ local function CharKey()
 end
 ns.CharKey = CharKey
 
+-- When this week began: the weekly reset, from the game's own timer
+-- (rounded to the minute, so repeated reads agree). nil on a client that
+-- doesn't report it - then weekly gold is simply off there.
+local function WeekStartEpoch()
+    local CD = C_DateAndTime
+    if not (CD and CD.GetSecondsUntilWeeklyReset) then return nil end
+    local ok, s = pcall(CD.GetSecondsUntilWeeklyReset)
+    if not ok or type(s) ~= "number" or (issecretvalue and issecretvalue(s)) then return nil end
+    return math.floor((time() + s - 7 * 86400) / 60 + 0.5) * 60
+end
+ns.WeekStartEpoch = WeekStartEpoch
+
+-- The gold a record (a character, or the warband bank) had when this week
+-- began. If it was last seen BEFORE the reset, its saved gold is exactly
+-- its gold at the reset (gold can't change while you're logged out), so
+-- the week starts exact. Otherwise - first seen this week, e.g. right after
+-- updating the addon - it starts from now, marked not exact, and weekly
+-- totals say "partial" until that clears up next week.
+local function WeekBase(rec, current, lastSeen)
+    local ws = WeekStartEpoch()
+    if not ws then return end
+    local w = rec.week
+    if type(w) == "table" and math.abs((tonumber(w.start) or 0) - ws) < 3600 then return end
+    local prev = tonumber(rec.money)
+    if prev and tonumber(lastSeen) and tonumber(lastSeen) < ws then
+        rec.week = { start = ws, money = prev, exact = true }
+    else
+        rec.week = { start = ws, money = current, exact = false }
+    end
+end
+
 -- one history point per day (updates in place if already recorded today)
 local function RecordDay(history, money, today)
     local last = history[#history]
@@ -84,6 +115,7 @@ local function Snapshot()
     if c.money ~= money or c.level ~= level then
         dirty = true
     end
+    WeekBase(c, money, c.lastSeen)  -- before c.money becomes today's
 
     c.money   = money
     c.class   = select(2, UnitClass("player")) or "UNKNOWN"
@@ -135,6 +167,7 @@ local function SnapshotWarband()
     local now = time()
     local w = ForgeGoldDB.warband or {}
     if w.money ~= amount then dirty = true end
+    WeekBase(w, amount, w.updated)
     w.money = amount
     w.updated = now
     w.history = w.history or {}

@@ -1,0 +1,23 @@
+name: tests
+
+# Runs every automated check on each push: the desktop app's logic (Python)
+# and the in-game addons, driven in a mock WoW client (Lua, via lupa).
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install lupa
+      - name: Desktop app tests
+        run: python -m unittest discover -s tests -v
+      - name: Addon tests (Forge's Ledger, Professions, Dungeons)
+        run: python tests/lua/run.py addon
+      - name: Addon tests (Forge's Chronicle)
+        run: python tests/lua/chron_run.py addon

@@ -554,12 +554,74 @@ local function GoldData()
         if type(c) == "table" then
             local money = key == me and GetMoney() or tonumber(c.money) or 0
             chars = chars + money
-            tinsert(list, { name = c.name or key, class = c.class, money = money, history = c.history })
+            tinsert(list, { key = key, name = c.name or key, class = c.class, money = money, history = c.history })
         end
     end
     table.sort(list, function(a, b) return a.money > b.money end)
     local bank = type(ForgeGoldDB.warband) == "table" and tonumber(ForgeGoldDB.warband.money) or nil
     return list, chars, bank, chars + (bank or 0)
+end
+
+-- The desktop app's companion data (goals and tasks you set in the app),
+-- if its small companion addon is installed: ForgesLedger_Companion, which
+-- the app writes. Read only - the app regenerates it; nil without it.
+local function Companion()
+    local c = ForgesLedgerCompanion
+    if type(c) == "table" and tonumber(c.companionVersion) then return c end
+end
+
+-- This week's gold: per character (and the warband bank), the change since
+-- the week began. Only records that have this week's start count. net =
+-- the sum; partial = some character's week started after the reset (first
+-- seen this week), so the number may be short. nil where the game doesn't
+-- report the weekly reset.
+local function WeekGold()
+    local ws = ns.WeekStartEpoch and ns.WeekStartEpoch()
+    if not ws then return nil end
+    local me = ns.CharKey()
+    local net, partial, per = 0, false, {}
+    local function add(key, rec, money)
+        local w = type(rec) == "table" and rec.week
+        if type(w) == "table" and math.abs((tonumber(w.start) or 0) - ws) < 3600 and tonumber(w.money) then
+            local d = (tonumber(money) or 0) - w.money
+            net = net + d
+            per[key] = d
+            if not w.exact then partial = true end
+        end
+    end
+    for key, c in pairs(ForgeGoldDB.chars or {}) do
+        if type(c) == "table" then add(key, c, key == me and GetMoney() or c.money) end
+    end
+    if type(ForgeGoldDB.warband) == "table" then add("warband", ForgeGoldDB.warband, ForgeGoldDB.warband.money) end
+    return net, partial, per
+end
+
+-- The weekly gold goal, in copper (nil = none). Set in game (here) or in
+-- the app (companion data): whichever was set last wins.
+local function WeeklyGoal()
+    local g = type(ForgeGoldDB.weeklyGoal) == "table" and tonumber(ForgeGoldDB.weeklyGoal.copper) and ForgeGoldDB.weeklyGoal
+    local comp = Companion()
+    local cg = comp and type(comp.weeklyGoal) == "table" and tonumber(comp.weeklyGoal.copper) and comp.weeklyGoal
+    local pick = g
+    if cg and (not g or (tonumber(cg.at) or tonumber(comp.generatedAt) or 0) > (tonumber(g.at) or 0)) then pick = cg end
+    local copper = pick and tonumber(pick.copper) or 0
+    return copper > 0 and copper or nil
+end
+
+-- "200000", "200,000g", "200 000" -> 200000 gold; empty or 0 clears the goal
+local function SetWeeklyGoal(text)
+    local digits = tostring(text or ""):gsub("[^%d]", "")
+    local gold = tonumber(digits) or 0
+    ForgeGoldDB.weeklyGoal = { copper = gold * 10000, at = time() }
+    print(ns.PREFIX .. (gold > 0 and ("Weekly gold goal: " .. Money(gold * 10000) .. ".") or "Weekly gold goal cleared."))
+end
+
+-- "This week: +128,400g  ·  Goal 200,000g (64%)"
+local function WeekLine(net, goal)
+    local sign = net >= 0 and "+" or "-"
+    local t = "This week: " .. sign .. Money(math.abs(net))
+    if goal then t = t .. "  \194\183  Goal " .. Money(goal) .. " (" .. math.floor(math.max(0, net) * 100 / goal) .. "%)" end
+    return t
 end
 
 -- Change since 7 days ago, from the daily history the addon keeps. nil if
@@ -578,10 +640,30 @@ end
 
 local function GoldLines(withChange)
     local list, chars, bank, total = GoldData()
-    local lines = { { text = "Characters", header = true } }
+    local lines = {}
+    -- this week (since the weekly reset): net, the goal, and where to set it
+    local net, partial, per = WeekGold()
+    if withChange and net then
+        local goal = WeeklyGoal()
+        tinsert(lines, { text = "This week", header = true })
+        tinsert(lines, { text = "Earned (all characters + warband bank)",
+                         right = (net >= 0 and "+" or "-") .. Money(math.abs(net)),
+                         rightColor = net >= 0 and { 0.25, 0.75, 0.25 } or { 0.82, 0.25, 0.25 } })
+        if goal then
+            tinsert(lines, { text = "Goal " .. Money(goal), right = math.floor(math.max(0, net) * 100 / goal) .. "%",
+                             bar = math.max(0, net) / goal })
+        end
+        tinsert(lines, { text = "Weekly goal", input = { placeholder = goal and "change it: gold, then Enter" or "gold, e.g. 200000, then Enter",
+                                                          value = "", onEnter = SetWeeklyGoal } })
+        if partial then
+            tinsert(lines, { text = "Partial week: some characters were first seen after the reset.", dim = true })
+        end
+    end
+    tinsert(lines, { text = "Characters", header = true })
     for _, e in ipairs(list) do
         local right = Money(e.money)
-        local d = withChange and WeekChange(e)
+        local d
+        if withChange and net then d = per[e.key] else d = withChange and WeekChange(e) end
         if d and math.abs(d) >= (IsRetail() and 10000 or 1) then
             right = (d > 0 and "|cff40c040+" or "|cffd04040-") .. Money(math.abs(d)) .. "|r    " .. right
         end
@@ -595,7 +677,8 @@ local function GoldLines(withChange)
     end
     tinsert(lines, { text = "Total", right = Money(total), header = true })
     if withChange then
-        tinsert(lines, { text = "Green/red: change over the last 7 days.", dim = true })
+        tinsert(lines, { text = net and "Green/red: change this week, since the weekly reset."
+                                    or "Green/red: change over the last 7 days.", dim = true })
     end
     return lines
 end
@@ -615,6 +698,8 @@ Register({
             if i > 10 then break end
             tinsert(rows, { name = e.name, class = e.class, value = Money(e.money) })
         end
+        local net = WeekGold()
+        if net then tinsert(footer, WeekLine(net, WeeklyGoal())) end
         if #list > 10 then tinsert(footer, "+" .. (#list - 10) .. " more characters") end
         if bank then tinsert(footer, "Includes the warband bank: " .. Money(bank)) end
         return { title = "Warband gold: " .. Money(total), icon = "Interface\\Icons\\INV_Misc_Coin_01",
@@ -669,6 +754,97 @@ end
 -- data, for one character (default: the one you're on). Items the game
 -- can't report (weekly quests, knowledge treasures) are ticked in the app,
 -- so they aren't here.
+------------------------------------------------------------ custom todos ---
+-- Tasks you write yourself: for every character (global) or one character,
+-- ticked by hand. Some are added here in game, some in the app (they come
+-- through the companion data). Ticks are per character and clear when the
+-- task's reset comes round (none, daily, weekly - the game's own resets).
+
+local MAX_TASKS = 30
+
+local function CustomDB()
+    local db = type(ForgeGoldDB.custom) == "table" and ForgeGoldDB.custom or {}
+    db.tasks = type(db.tasks) == "table" and db.tasks or {}
+    db.done = type(db.done) == "table" and db.done or {}
+    db.deleted = type(db.deleted) == "table" and db.deleted or {}
+    ForgeGoldDB.custom = db
+    return db
+end
+
+local function DayStart()
+    local CD = C_DateAndTime
+    if CD and CD.GetSecondsUntilDailyReset then
+        local ok, s = pcall(CD.GetSecondsUntilDailyReset)
+        if ok and type(s) == "number" then return time() + s - 86400 end
+    end
+    return sessionStart
+end
+
+-- every live task (game's and app's), oldest first; deleted ones never come back
+local function CustomTasks()
+    local db, comp = CustomDB(), Companion()
+    local gone = {}
+    for id in pairs(db.deleted) do gone[id] = true end
+    if comp and type(comp.deleted) == "table" then
+        for _, id in pairs(comp.deleted) do gone[tostring(id)] = true end
+    end
+    local out, seen = {}, {}
+    local function take(list, by)
+        for _, t in pairs(type(list) == "table" and list or {}) do
+            if type(t) == "table" and t.id and t.text and not gone[tostring(t.id)] and not seen[tostring(t.id)] then
+                seen[tostring(t.id)] = true
+                tinsert(out, { id = tostring(t.id), text = tostring(t.text), scope = t.scope or "global",
+                               reset = t.reset or "none", by = by, at = tonumber(t.at) or 0 })
+            end
+        end
+    end
+    take(comp and comp.tasks, "app")
+    take(db.tasks, "game")
+    table.sort(out, function(a, b) if a.at ~= b.at then return a.at < b.at end return a.id < b.id end)
+    return out
+end
+
+local function TaskApplies(t, key) return t.scope == "global" or t.scope == key end
+
+local function TaskDone(t, key)
+    local ts = tonumber((CustomDB().done[key] or {})[t.id])
+    if not ts then return false end
+    if t.reset == "daily" then return ts >= DayStart() end
+    if t.reset == "weekly" then return ts >= WeekStart() end
+    return true
+end
+
+local function ToggleTask(t)
+    local done = CustomDB().done
+    local me = ns.CharKey()
+    done[me] = done[me] or {}
+    done[me][t.id] = (not TaskDone(t, me)) and time() or nil
+    QueueRefresh()
+end
+
+local function DeleteTask(t)
+    local db = CustomDB()
+    db.deleted[t.id] = time()
+    db.tasks[t.id] = nil
+    for _, d in pairs(db.done) do if type(d) == "table" then d[t.id] = nil end end
+    print(ns.PREFIX .. "Deleted: " .. t.text)
+    QueueRefresh()
+end
+
+local function AddTask(text)
+    text = strtrim(tostring(text or ""))
+    if text == "" then return end
+    if #CustomTasks() >= MAX_TASKS then
+        print(ns.PREFIX .. "That's the limit of " .. MAX_TASKS .. " tasks - delete one first.")
+        return
+    end
+    local db = CustomDB()
+    local id = "g" .. time() .. math.random(1000, 9999)
+    db.tasks[id] = { id = id, text = text, scope = Settings().customAll and "global" or ns.CharKey(),
+                     reset = "none", at = time() }
+    QueueRefresh()
+end
+
 local function TodoItems(char)
     local items = {}
     local f, c = Facts(char)
@@ -715,6 +891,19 @@ local function TodoItems(char)
     return items, true
 end
 
+-- the game's items plus this character's custom tasks (they count on the bar)
+local GameTodoItems = TodoItems
+TodoItems = function(char, key)
+    local items, fresh = GameTodoItems(char)
+    key = key or ns.CharKey()
+    for _, t in ipairs(CustomTasks()) do
+        if TaskApplies(t, key) then
+            tinsert(items, { label = t.text, done = TaskDone(t, key), custom = t })
+        end
+    end
+    return items, fresh
+end
+
 Register({
     id = "todo", label = "Todo", order = 20,
     updateEvents = { "WEEKLY_REWARDS_UPDATE", "UPDATE_INSTANCE_INFO", "CHALLENGE_MODE_COMPLETED", "BOSS_KILL" },
@@ -730,7 +919,7 @@ Register({
         local list = {}
         for key, c in pairs(ForgeGoldDB.chars or {}) do
             if type(c) == "table" then
-                local items = TodoItems(c)
+                local items = TodoItems(c, key)
                 local done = 0
                 for _, it in ipairs(items) do if it.done then done = done + 1 end end
                 if #items > 0 and done < #items then
@@ -756,15 +945,43 @@ Register({
     window = { title = "Todo", lines = function()
         local items, fresh = TodoItems()
         local lines = { { text = "This character", header = true } }
+        local mine = {}
         for _, it in ipairs(items) do
-            tinsert(lines, { text = (it.done and CHECK or BOX) .. " " .. it.label, right = it.detail,
-                             color = it.done and C.dim or nil })
+            if it.custom then
+                tinsert(mine, it)
+            else
+                tinsert(lines, { text = (it.done and CHECK or BOX) .. " " .. it.label, right = it.detail,
+                                 color = it.done and C.dim or nil })
+            end
         end
         if not fresh then
             tinsert(lines, { text = "This week's progress updates a few seconds after login.", dim = true })
         end
-        tinsert(lines, { text = "Only what the game reports is listed here.", dim = true })
-        tinsert(lines, { text = "Tick weekly quests and the rest in the app's Todo tab.", dim = true })
+        -- Custom: your own tasks (closed by default while there are none)
+        local s = Settings()
+        local open = s.customOpen
+        if open == nil then open = #mine > 0 end
+        local left = 0
+        for _, it in ipairs(mine) do if not it.done then left = left + 1 end end
+        tinsert(lines, { text = "Custom" .. ((#mine > 0 and left == 0) and ("  -  all done " .. CHECK) or ""), header = true,
+                         right = (open and "hide" or "show") .. (#mine > 0 and ("  (" .. (#mine - left) .. "/" .. #mine .. ")") or ""),
+                         rightColor = C.dim, onClick = function() Settings().customOpen = not open end })
+        if open then
+            for _, it in ipairs(mine) do
+                local t = it.custom
+                tinsert(lines, { text = (it.done and CHECK or BOX) .. " " .. t.text, indent = true,
+                                 right = t.scope == "global" and "all toons" or (t.reset ~= "none" and t.reset or nil),
+                                 rightColor = C.dim, color = it.done and C.dim or nil,
+                                 onClick = function() ToggleTask(t) end,
+                                 onRightClick = function() DeleteTask(t) end })
+            end
+            tinsert(lines, { text = "Add a task", input = { placeholder = s.customAll and "for all characters, then Enter"
+                                                                   or "for this character, then Enter", onEnter = AddTask } })
+            tinsert(lines, { text = (s.customAll and CHECK or BOX) .. " For all characters", indent = true,
+                             onClick = function() Settings().customAll = not Settings().customAll end })
+            tinsert(lines, { text = "Click a task to tick it, right-click to delete it.", dim = true })
+        end
+        tinsert(lines, { text = "Weekly quests and more: the app's Todo tab.", dim = true })
         return lines
     end },
 }, true)

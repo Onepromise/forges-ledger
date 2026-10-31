@@ -1,4 +1,4 @@
--- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.11)
+-- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.12)
 -- One builder makes every window the bar opens - the main Ledger window,
 -- each segment's details, settings - so they all look and behave the same:
 -- a title you can drag, a close button, and a scrolling list of lines.
@@ -62,14 +62,58 @@ local function GetRow(f, i)
     local hl = r:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
     hl:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.12)
-    r:SetScript("OnClick", function(self)
-        if not self.onClick then return end
-        local ok, err = pcall(self.onClick)
+    r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    r:SetScript("OnClick", function(self, button)
+        local fn = (button == "RightButton" and self.onRightClick) or self.onClick
+        if not fn then return end
+        local ok, err = pcall(fn)
         if not ok then print(ns.PREFIX .. tostring(err)) end
         W.RefreshAll()  -- e.g. a settings tick changes what the window shows
     end)
+    -- a thin progress bar along the row's bottom (line.bar = 0..1)
+    r.track = r:CreateTexture(nil, "ARTWORK")
+    r.track:SetPoint("BOTTOMLEFT", 2, 1)
+    r.track:SetPoint("BOTTOMRIGHT", -2, 1)
+    r.track:SetHeight(3)
+    r.track:SetColorTexture(0, 0, 0, 0.6)
+    r.fill = r:CreateTexture(nil, "OVERLAY")
+    r.fill:SetPoint("TOPLEFT", r.track, "TOPLEFT")
+    r.fill:SetPoint("BOTTOMLEFT", r.track, "BOTTOMLEFT")
+    r.fill:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.95)
     f.rows[i] = r
     return r
+end
+
+-- A line with an input box (line.input = { placeholder, value, onEnter }):
+-- Enter hands the text to onEnter; Escape leaves it.
+local function GetEdit(r)
+    if r.edit then return r.edit end
+    local e = CreateFrame("EditBox", nil, r)
+    e:SetAutoFocus(false)
+    e:SetFontObject("GameFontHighlightSmall")
+    e:SetHeight(16)
+    e:SetMaxLetters(80)
+    local bg = e:CreateTexture(nil, "BACKGROUND")
+    bg:SetPoint("TOPLEFT", -3, 1)
+    bg:SetPoint("BOTTOMRIGHT", 3, -1)
+    bg:SetColorTexture(0, 0, 0, 0.5)
+    e.ph = e:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    e.ph:SetPoint("LEFT", 1, 0)
+    e.ph:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+    e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    e:SetScript("OnEnterPressed", function(self)
+        local fn, text = self.onEnter, self:GetText() or ""
+        self:SetText("")
+        self:ClearFocus()
+        if fn then
+            local ok, err = pcall(fn, text)
+            if not ok then print(ns.PREFIX .. tostring(err)) end
+        end
+        W.RefreshAll()
+    end)
+    e:SetScript("OnTextChanged", function(self) self.ph:SetShown((self:GetText() or "") == "") end)
+    r.edit = e
+    return e
 end
 
 local function Render(f)
@@ -88,7 +132,26 @@ local function Render(f)
         local rc = line.rightColor or (line.dim and C.dim) or C.gold
         r.right:SetTextColor(rc[1], rc[2], rc[3])
         r.onClick = type(line.onClick) == "function" and line.onClick or nil
-        r:EnableMouse(r.onClick ~= nil)
+        r.onRightClick = type(line.onRightClick) == "function" and line.onRightClick or nil
+        r:EnableMouse(r.onClick ~= nil or r.onRightClick ~= nil)
+        local bar = tonumber(line.bar)
+        r.track:SetShown(bar ~= nil)
+        r.fill:SetShown(bar ~= nil and bar > 0)
+        if bar then r.fill:SetWidth(math.max(1, (WIDTH - 54) * math.max(0, math.min(1, bar)))) end
+        if type(line.input) == "table" then
+            local e = GetEdit(r)
+            e.onEnter = line.input.onEnter
+            e:ClearAllPoints()
+            e:SetPoint("LEFT", r, "LEFT", (line.text and line.text ~= "") and 120 or 4, 0)
+            e:SetPoint("RIGHT", r, "RIGHT", -4, 0)
+            e.ph:SetText(tostring(line.input.placeholder or ""))
+            if not (e.HasFocus and e:HasFocus()) then e:SetText(tostring(line.input.value or "")) end
+            e.ph:SetShown((e:GetText() or "") == "")
+            e:Show()
+            r.right:SetText("")
+        elseif r.edit then
+            r.edit:Hide()
+        end
         r:Show()
     end
     for i = #lines + 1, #f.rows do f.rows[i]:Hide() end

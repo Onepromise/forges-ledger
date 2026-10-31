@@ -25,6 +25,7 @@ import http.server
 import json
 import math
 import os
+import random
 import re
 import secrets
 import shutil
@@ -670,6 +671,11 @@ def _read_addon_db(db, folder, out, warbands):
             # addon v2.4+: this week's facts for the Todo tab (absent = manual)
             "todo": c.get("todo") if isinstance(c.get("todo"), dict) else None,
             "folder": folder,
+            # core v2.12+: the gold this character had when the week began
+            "week": c.get("week") if isinstance(c.get("week"), dict) else None,
+            # the addon's own name for the character ("Name-Realm"), which
+            # custom tasks use to target one character
+            "addon_key": str(key),
         }
     # calendar events (e.g. Timewalking) are the same for every account;
     # keep the most recently read
@@ -680,7 +686,27 @@ def _read_addon_db(db, folder, out, warbands):
     w = db.get("warband")
     if isinstance(w, dict) and isinstance(w.get("money"), (int, float)):
         warbands[folder] = {"money": w["money"], "updated": w.get("updated", 0),
-                            "history": _history(w.get("history"))}
+                            "history": _history(w.get("history")),
+                            "week": w.get("week") if isinstance(w.get("week"), dict) else None}
+    # core v2.12+: the weekly gold goal set in game (newest across accounts)
+    g = db.get("weeklyGoal")
+    if isinstance(g, dict) and isinstance(g.get("copper"), (int, float)):
+        if g.get("at", 0) >= warbands.get("__goal__", {}).get("at", -1):
+            warbands["__goal__"] = {"copper": int(g["copper"]), "at": g.get("at", 0) or 0}
+    # core v2.12+: custom tasks added in game, their ticks, and deletes
+    cu = db.get("custom")
+    if isinstance(cu, dict):
+        acc = warbands.setdefault("__custom__", {"tasks": {}, "done": {}, "deleted": {}})
+        for t in (cu.get("tasks") or {}).values() if isinstance(cu.get("tasks"), dict) else []:
+            if isinstance(t, dict) and t.get("id") and t.get("text"):
+                acc["tasks"][str(t["id"])] = t
+        if isinstance(cu.get("deleted"), dict):
+            for tid, ts in cu["deleted"].items():
+                acc["deleted"][str(tid)] = ts
+        if isinstance(cu.get("done"), dict):
+            for ckey, d in cu["done"].items():
+                if isinstance(d, dict):
+                    acc["done"].setdefault(str(ckey), {}).update({str(k): v for k, v in d.items()})
 
 
 def account_labels(characters):
@@ -924,10 +950,28 @@ def region():
     return r if r in REGIONS else "us"
 
 
+class ApiError(RuntimeError):
+    """A Blizzard reply that wasn't a success; .code is the HTTP status.
+    (404 for an inactive character is normal, not a failure.)"""
+    def __init__(self, code, body=""):
+        super().__init__("Blizzard API error %s: %s" % (code, body))
+        self.code = code
+
+
+# replies worth trying again: rate-limited, or Blizzard having a bad moment
+RETRY_CODES = (429, 500, 502, 503, 504)
+RETRY_WAITS = (1, 3, 8)  # seconds before the 2nd, 3rd and 4th try
+
+
+def is_transient(err):
+    """Would trying again later plausibly work? (Not for a 404 or a 403:
+    Blizzard simply has nothing to give for that character.)"""
+    if isinstance(err, ApiError):
+        return err.code in RETRY_CODES
+    return True  # no answer at all: offline, a timeout, a cut-off reply
+
+
 def api_get(path, params=None):
-    # /profile/user/... is "your account" data and needs the login token;
-    # everything else uses the self-renewing app token
-    token = ensure_token() if path.startswith("/profile/user/") else app_token()
     reg = region()
     q = dict(params or {})
     q["locale"] = "en_US"
@@ -939,13 +983,37 @@ def api_get(path, params=None):
     elif path.startswith("/data/"):
         q["namespace"] = "static-" + reg
     url += "?" + urllib.parse.urlencode(q)
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError("Blizzard API error %s: %s" % (e.code, body))
+    last = None
+    for attempt in range(len(RETRY_WAITS) + 1):
+        # /profile/user/... is "your account" data and needs the login token;
+        # everything else uses the self-renewing app token. Fetched on every
+        # try so a token that expired mid-sync is replaced.
+        token = ensure_token() if path.startswith("/profile/user/") else app_token()
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:300]
+            last = ApiError(e.code, body)
+            if e.code == 401 and attempt == 0 and not path.startswith("/profile/user/"):
+                _APP_TOKEN["token"] = None  # expired early: get a new one once
+                continue
+            if e.code not in RETRY_CODES or attempt >= len(RETRY_WAITS):
+                raise last
+            wait = RETRY_WAITS[attempt]
+            try:  # Blizzard says how long to wait when it rate-limits
+                wait = max(wait, min(20, int(e.headers.get("Retry-After", 0))))
+            except (TypeError, ValueError, AttributeError):
+                pass
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as e:
+            # no answer, or a reply cut off partway (ValueError: bad JSON)
+            last = RuntimeError("Couldn't reach Blizzard: %s" % getattr(e, "reason", e))
+            if attempt >= len(RETRY_WAITS):
+                raise last
+            time.sleep(RETRY_WAITS[attempt])
+    raise last
 
 
 def parse_professions(prof):
@@ -1013,9 +1081,14 @@ def refresh_character(entry):
     """Fill one character's profile details + professions from Blizzard.
 
     Each call is allowed to fail on its own: Blizzard 404s characters that
-    haven't logged in recently, and that shouldn't sink the whole sync."""
+    haven't logged in recently, and that shouldn't sink the whole sync. A
+    failed call leaves what the entry already holds untouched, so a hiccup
+    never blanks a character. Returns "ok", "missing" (Blizzard has nothing
+    for this character: normal for inactive ones) or "failed" (Blizzard
+    didn't answer: the last known details are kept)."""
     path = "/profile/wow/character/%s/%s" % (
         entry["realm_slug"], urllib.parse.quote(entry["name"].lower()))
+    results = []
     try:
         s = api_get(path)
         entry["level"] = s.get("level", entry.get("level", 0))
@@ -1025,12 +1098,17 @@ def refresh_character(entry):
         entry["race"] = (s.get("race") or {}).get("name", "")
         entry["spec"] = (s.get("active_spec") or {}).get("name", "")
         entry["guild"] = (s.get("guild") or {}).get("name", "")
-    except Exception:
-        pass
+        results.append("ok")
+    except Exception as e:
+        results.append("failed" if is_transient(e) else "missing")
     try:
         entry["professions"] = parse_professions(api_get(path + "/professions"))
-    except Exception:
-        pass
+        results.append("ok")
+    except Exception as e:
+        results.append("failed" if is_transient(e) else "missing")
+    if "failed" in results:
+        return "failed"
+    return "ok" if "ok" in results else "missing"
 
 
 def sync_all():
@@ -1064,17 +1142,43 @@ def sync_all():
                     "professions": [],
                 })
     else:
-        # keep last known professions in case this character's refresh fails
-        keep = ("account_id", "name", "realm_slug", "realm", "level", "class",
-                "faction", "professions")
-        bases = [{k: c.get(k) for k in keep} for c in old["characters"]]
+        # everything we already know about each character, so a failed
+        # refresh keeps its last known details
+        bases = [dict(c) for c in old["characters"]]
+    # Start from what the last sync knew about each character, updated with
+    # the fresh character list. A refresh that fails (Blizzard rate-limiting,
+    # a timeout) then leaves the old details in place instead of blanking
+    # the character until the next hourly sync.
+    prev = {norm(c["name"]) + "@" + norm(c.get("realm_slug", "")): c
+            for c in old.get("characters", [])}
     dataset = []
-    for i, entry in enumerate(bases):
-        refresh_character(entry)
+    tally = {"ok": 0, "missing": 0, "failed": 0, "failed_names": []}
+    streak = 0
+    for i, base in enumerate(bases):
+        before = prev.get(norm(base["name"]) + "@" + norm(base.get("realm_slug", "")))
+        entry = dict(before) if before else {}
+        entry.update({k: v for k, v in base.items() if k != "professions"})
+        if base.get("professions") or "professions" not in entry:
+            entry["professions"] = base.get("professions") or []
+        outcome = refresh_character(entry)
+        tally[outcome] += 1
+        if outcome == "failed":
+            streak += 1
+            if len(tally["failed_names"]) < 6:
+                tally["failed_names"].append(entry["name"])
+            if streak >= 6:
+                # Blizzard has stopped answering: stop, and save nothing,
+                # rather than grinding on and recording a half-empty sync
+                raise RuntimeError(
+                    "Blizzard stopped answering partway through (%d characters in a row "
+                    "failed), so nothing was changed. It will try again by itself." % streak)
+        else:
+            streak = 0
         dataset.append(entry)
         if (i + 1) % 5 == 0 or (i + 1) == len(bases):
             print("  synced %d/%d characters..." % (i + 1, len(bases)), flush=True)
         time.sleep(0.05)  # be polite to the API
+    STATE["sync_tally"] = tally
     catalog = sync_catalog(dataset, old.get("catalog", {}))
     collections = sync_collections(dataset)
     if not logged_in:
@@ -1435,6 +1539,34 @@ def normalize_professions(profs):
     return out
 
 
+SYNC_STATUS_PATH = os.path.join(BASE_DIR, "sync_status.json")
+
+
+def sync_status():
+    """The last sync attempt and its outcome. Kept on disk, so a failing sync
+    is still reported after the app restarts instead of going quiet."""
+    try:
+        with open(SYNC_STATUS_PATH, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_sync(ok, error=None, tally=None):
+    st = sync_status()
+    now = int(time.time())
+    st.update({"attempt_at": now, "ok": bool(ok), "error": error})
+    if ok:
+        st["ok_at"] = now
+        st["notes"] = {k: v for k, v in (tally or {}).items()}
+    try:
+        with open(SYNC_STATUS_PATH, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except OSError as e:
+        print("Couldn't save the sync status: %s" % e, flush=True)
+
+
 def do_sync():
     if STATE["syncing"]:
         print("Sync already running - ignoring duplicate request.", flush=True)
@@ -1443,11 +1575,16 @@ def do_sync():
     STATE["sync_error"] = None
     print("Sync started...", flush=True)
     try:
+        STATE["sync_tally"] = None
         data = sync_all()
         with CACHE_LOCK:
             save_cache(data)
-        print("Sync complete: %d characters saved." % len(data["characters"]),
-              flush=True)
+        t = STATE.get("sync_tally") or {}
+        record_sync(True, None, t)
+        print("Sync complete: %d characters saved%s." % (
+            len(data["characters"]),
+            (" (%d couldn't be refreshed and kept their last details)" % t["failed"]) if t.get("failed") else ""),
+            flush=True)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1458,6 +1595,7 @@ def do_sync():
                    "back: your login is saved in forge_dashboard_config.json next "
                    "to the script, so each copy starts fresh.")
         STATE["sync_error"] = msg
+        record_sync(False, msg)
         print("Sync FAILED: %s" % msg, flush=True)
     finally:
         STATE["syncing"] = False
@@ -1500,6 +1638,7 @@ def auto_sync_loop():
     retention rule. Checks every 5 minutes so a stale cache after the PC
     wakes from sleep gets picked up quickly."""
     time.sleep(5)  # let the server finish starting first
+    fails, next_try = 0, 0
     while True:
         try:
             check_for_update()  # no-op unless a day has passed
@@ -1507,36 +1646,65 @@ def auto_sync_loop():
             pass
         try:
             age = time.time() - load_cache().get("synced_at", 0)
-            if age >= AUTO_SYNC_EVERY and has_credentials() and not STATE["syncing"]:
+            if (age >= AUTO_SYNC_EVERY and has_credentials() and not STATE["syncing"]
+                    and time.time() >= next_try):
                 print("Auto-sync: Blizzard data is %d min old." % (age // 60),
                       flush=True)
                 do_sync()
+                if STATE["sync_error"]:
+                    # still failing: wait longer each time (10, 20, 40, then
+                    # 60 minutes) rather than hammering Blizzard every 5
+                    fails += 1
+                    next_try = time.time() + min(3600, 600 * 2 ** (fails - 1))
+                else:
+                    fails, next_try = 0, 0
         except Exception as e:
             print("Auto-sync check failed: %s" % e, flush=True)
         time.sleep(300)
 
 
-def watch_addon_file():
-    """Notice the moment WoW writes the addon's save file (/fl sync,
-    /reload, logout) and refresh that character. Polling every 2s is
-    simpler than OS file-watch APIs and costs nothing measurable."""
-    last = None
-    while True:
+def watch_tick(seen):
+    """One look at every addon save file (retail and Forever, every WoW
+    account). A file whose modified time changed since the last look gets
+    its character refreshed from Blizzard. Returns the newest modified
+    time, or None when there are no files."""
+    newest = None
+    paths = [p for _f, p in find_sv_files()]
+    for c in forever_clients():
+        paths += [p for _f, p in find_sv_files(c)]
+    for path in paths:
         try:
-            path = find_sv_file()
-            mtime = os.path.getmtime(path) if path else None
-            if mtime and last and mtime != last:
-                STATE["sv_mtime"] = mtime
-                print("Addon data saved in game - updating.", flush=True)
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        newest = max(newest or 0, mtime)
+        last = seen.get(path)
+        if last is not None and mtime != last:
+            print("Addon data saved in game - updating.", flush=True)
+            try:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     db = parse_savedvariables(f.read())
-                if db.get("lastChar"):
-                    threading.Thread(target=quick_sync, args=(str(db["lastChar"]),),
-                                     daemon=True).start()
-            STATE["sv_mtime"] = mtime
-            last = mtime or last
+            except Exception as e:
+                # WoW may be mid-write; not marked as seen, so the next
+                # tick looks at the finished file
+                print("Addon watcher: %s" % e, flush=True)
+                continue
+            if db.get("lastChar"):
+                threading.Thread(target=quick_sync, args=(str(db["lastChar"]),),
+                                 daemon=True).start()
+        seen[path] = mtime
+    return newest
+
+
+def watch_addon_file():
+    """Notice the moment WoW writes an addon save file (/fl sync, /reload,
+    logout) and refresh that character. Polling every 2s is simpler than OS
+    file-watch APIs and costs nothing measurable."""
+    seen = {}  # each save file's last-seen modified time, by path
+    while True:
+        try:
+            STATE["sv_mtime"] = watch_tick(seen)
         except Exception as e:
-            # WoW may be mid-write; the next tick will see the finished file
             print("Addon watcher: %s" % e, flush=True)
         time.sleep(2)
 
@@ -1687,6 +1855,133 @@ def todo_checks(settings):
     if not t and old.get("week") == week_id():
         weekly = old.get("checks", {})
     return {"daily": daily, "weekly": weekly}
+
+
+MAX_CUSTOM_TASKS = 30
+
+
+def weekly_status(shown_gold, warbands, settings, game_goal):
+    """This week's gold (core v2.12+ data). Per character and per warband
+    bank: the change since its week began. net = their sum (moving gold
+    between your characters or into a bank cancels out); gross = only the
+    gains (so gold moved between your own characters counts on the side that
+    received it - the page says so). partial = someone played this week has
+    no exact week start yet. None when no character has a week start."""
+    ws = next_reset() - 7 * 86400
+    rows, net, gross, partial, any_week = [], 0, 0, False, False
+
+    def take(label, rec, money, last_seen, extra):
+        nonlocal net, gross, partial, any_week
+        w = rec.get("week")
+        if isinstance(w, dict) and abs((w.get("start") or 0) - ws) < 3600 and isinstance(w.get("money"), (int, float)):
+            any_week = True
+            d = int(money) - int(w["money"])
+            net += d
+            gross += max(0, d)
+            if not w.get("exact"):
+                partial = True
+            if d:
+                rows.append(dict(extra, name=label, delta=d))
+        elif (last_seen or 0) >= ws:
+            partial = True  # played this week, but by an addon without week starts
+
+    for key, g in shown_gold.items():
+        take(g.get("name", key), g, g.get("money", 0), g.get("last_seen", 0), {"key": key, "class": g.get("class", "")})
+    for folder, w in warbands.items():
+        take("Warband bank", w, w.get("money", 0), w.get("updated", 0), {"key": "__bank__" + folder, "class": ""})
+    if not any_week:
+        return None
+    app_goal = settings.get("weekly_goal") if isinstance(settings.get("weekly_goal"), dict) else None
+    goal, source = None, None
+    for src, gl in (("app", app_goal), ("game", game_goal)):
+        if gl and isinstance(gl.get("copper"), (int, float)) and (goal is None or (gl.get("at") or 0) > (goal.get("at") or 0)):
+            goal, source = gl, src
+    copper = int(goal["copper"]) if goal and goal.get("copper") else 0
+    rows.sort(key=lambda r: -r["delta"])
+    return {"start": ws, "next": next_reset(), "net": net, "gross": gross, "partial": partial,
+            "goal": copper or None, "goal_source": source if copper else None, "contributions": rows}
+
+
+def custom_view(settings, game_custom):
+    """Custom tasks: the app's own plus the ones added in game, minus every
+    delete (from either side); the app's copy wins over a game task with the
+    same id (that's how editing a game-made task works). Ticks come from
+    the game, per character."""
+    game_custom = game_custom or {"tasks": {}, "done": {}, "deleted": {}}
+    gone = set(str(k) for k in (settings.get("custom_deleted") or {}))
+    gone |= set(str(k) for k in (game_custom.get("deleted") or {}))
+    tasks, seen = [], set()
+    for t in list(settings.get("custom_tasks") or []) + [dict(t, by="game") for t in game_custom.get("tasks", {}).values()]:
+        tid = str(t.get("id"))
+        if tid in gone or tid in seen or not t.get("text"):
+            continue
+        seen.add(tid)
+        tasks.append({"id": tid, "text": str(t["text"]), "scope": t.get("scope") or "global",
+                      "reset": t.get("reset") or "none", "by": t.get("by") or "app", "at": t.get("at") or 0})
+    tasks.sort(key=lambda t: (t["at"], t["id"]))
+    return {"tasks": tasks, "done": game_custom.get("done") or {}, "cap": MAX_CUSTOM_TASKS,
+            "daily_start": next_daily_reset() - 86400, "weekly_start": next_reset() - 7 * 86400}
+
+
+def _lua(v, ind=1):
+    pad = "    " * ind
+    if v is None:
+        return "nil"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(int(v)) if float(v).is_integer() else repr(v)
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ") + '"'
+    if isinstance(v, (list, tuple)):
+        return "{\n" + "".join(pad + _lua(x, ind + 1) + ",\n" for x in v) + "    " * (ind - 1) + "}"
+    if isinstance(v, dict):
+        return "{\n" + "".join(pad + "[" + _lua(str(k)) + "] = " + _lua(x, ind + 1) + ",\n"
+                                for k, x in v.items() if x is not None) + "    " * (ind - 1) + "}"
+    return "nil"
+
+
+COMPANION_FOLDER = "ForgesLedger_Companion"
+
+
+def write_companion(settings=None):
+    """The app -> game pipe: a tiny generated addon next to the others,
+    ForgesLedger_Companion, holding what you set in the app (the weekly gold
+    goal, custom tasks and deletes). Its own folder, so the CurseForge app's
+    updates of Forge's Ledger never wipe it. WoW reads it at login or
+    /reload. Returns the folder written, or None (no WoW folder found)."""
+    settings = settings or load_settings()
+    root = settings.get("wow_path") or wow_root()
+    addons = os.path.join(root, "_retail_", "Interface", "AddOns") if root else ""
+    if not addons or not os.path.isdir(addons):
+        return None
+    dest = os.path.join(addons, COMPANION_FOLDER)
+    os.makedirs(dest, exist_ok=True)
+    now = int(time.time())
+    data = {"companionVersion": 1, "generatedAt": now,
+            "weeklyGoal": settings.get("weekly_goal") if isinstance(settings.get("weekly_goal"), dict) else None,
+            "tasks": [{"id": t["id"], "text": t["text"], "scope": t.get("scope", "global"),
+                       "reset": t.get("reset", "none"), "at": t.get("at", now)}
+                      for t in (settings.get("custom_tasks") or []) if isinstance(t, dict) and t.get("id")],
+            "deleted": sorted(str(k) for k in (settings.get("custom_deleted") or {}))}
+    toc = ("## Interface: 120000, 120100, 120105\n"
+           "## Title: Forge's Ledger: Companion data\n"
+           "## Notes: Written by the Forge's Ledger desktop app: the weekly gold goal and the tasks you set there. "
+           "Don't edit it - the app rewrites it. Remove it and nothing breaks.\n"
+           "## Author: Forge at Crescent Cove\n"
+           "## Version: 1\n"
+           "## X-Website: https://thecrescentcove.com/forge-ledger\n"
+           "Companion.lua\n")
+    lua = ("-- Generated by the Forge's Ledger desktop app at %s. Do not edit: the app\n"
+           "-- rewrites this file whenever you change a goal or a task there. Newest\n"
+           "-- wins: a goal or task changed in game after generatedAt keeps the game's.\n"
+           "ForgesLedgerCompanion = %s\n" % (datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds"), _lua(data)))
+    for name, text in (("ForgesLedger_Companion.toc", toc), ("Companion.lua", lua)):
+        tmp = os.path.join(dest, name + ".tmp")
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(dest, name))
+    return dest
 
 
 def todo_payload(settings, game, events):
@@ -2229,6 +2524,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
 <div id="alert"></div>
 <div class="stats" id="stats"></div>
 <div id="goal"></div>
+<div id="weekgold"></div>
 
 <nav class="tabs">
   <button class="tab" data-tab="roster">Roster</button>
@@ -2290,6 +2586,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   </div>
   <div class="card scroll"><table id="wtable"></table></div>
   <div id="wextra"></div>
+  <div id="custom"></div>
   <div class="hint">Green items are checked by the addon from what it saw in game since the reset; boxes are for you to tick. Daily ticks clear at the daily reset, weekly ticks on Tuesday (US).</div>
 </section>
 
@@ -2428,7 +2725,7 @@ function header(){
     if(D.addon_error)fa+='<div class="alert err">'+esc(D.addon_error)+"</div>";
     if(!D.characters.length)fa+='<div class="alert info">No Forever characters yet. Install the addon in your Forever client (<a href="/setup" style="color:inherit">Settings</a> → Update addon), log into a character, then type <b>/fl sync</b>. Blizzard doesn&#39;t offer Forever character data yet, so everything here comes from the addon.</div>';
     $("alert").innerHTML=fa;
-    const t=D.totals;renderGoal();
+    const t=D.totals;renderGoal();renderWeekGold();
     $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP,"chars")+stat(t.levels_remaining.toLocaleString(),"levels to go","levels")
         :stat("—","tracked characters — click ☆ next to a name to track it","chars")+stat("—","levels to go","levels"))+
       stat('<span class="goldv">'+money(t.gold_total)+"</span>","total gold","gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days","change");
@@ -2447,14 +2744,20 @@ function header(){
   if(D.update&&readDismissed()!==D.update.version)a+='<div class="alert ok">Forge&#39;s Ledger <b>v'+esc(D.update.version)+'</b> is available. '+
     '<a href="'+esc(D.update.url)+'" target="_blank" rel="noopener" style="color:inherit"><b>See what&#39;s new and download</b></a> · '+
     '<a href="#" data-dismiss-update="'+esc(D.update.version)+'" style="color:inherit">Not now</a></div>';
+  const ss=D.sync_status||{};
   if(D.sync_error)a+='<div class="alert err">Last sync failed: '+esc(D.sync_error)+"</div>";
+  else if(ss.ok===false&&ss.error&&!D.syncing)a+='<div class="alert err">The last sync attempt ('+agoShort(ss.attempt_at)+') failed: '+esc(ss.error)+
+    (D.synced_at?" You&#39;re seeing the data from "+agoShort(D.synced_at)+". ":" ")+"It tries again by itself.</div>";
+  else if(ss.ok&&ss.notes&&ss.notes.failed&&!D.syncing)a+='<div class="alert info">'+ss.notes.failed+" character"+(ss.notes.failed===1?"":"s")+
+    " couldn&#39;t be refreshed from Blizzard this time (it didn&#39;t answer) and kept "+(ss.notes.failed===1?"its":"their")+" last known details"+
+    (ss.notes.failed_names&&ss.notes.failed_names.length?": "+ss.notes.failed_names.map(esc).join(", ")+(ss.notes.failed>ss.notes.failed_names.length?" and more":""):"")+".</div>";
   if(D.syncing)a+='<div class="alert info">Syncing with Blizzard… the first sync with recipe lists takes a few minutes. This page refreshes on its own.</div>';
   const legacy=D.characters.some(c=>c.professions.some(p=>p.tiers.length===1&&p.tiers[0].id==null&&p.tiers[0].recipes.length===0&&p.tiers[0].name));
   if(legacy&&!D.syncing)a+='<div class="alert info">Profession data is from the old version (one tier per profession, no recipes). Hit <b>Sync now</b> to pull every expansion tier and recipe.</div>';
   $("alert").innerHTML=a;
   $("syncbtn").disabled=!!D.syncing;$("syncbtn").textContent=D.syncing?"Syncing…":"Sync now";
   const t=D.totals;
-  renderGoal();
+  renderGoal();renderWeekGold();
   $("stats").innerHTML=(t.tracked?stat(t.at_cap+" / "+t.tracked,"tracked characters at "+CAP,"chars")+stat(t.levels_remaining.toLocaleString(),"levels to go","levels")
       :stat("—","tracked characters — click ☆ next to a name to track it","chars")+stat("—","levels to go","levels"))+
     stat('<span class="goldv">'+money(t.gold_total)+"</span>",bankLine(t),"gold")+stat('<span class="goldv">'+signedMoney(t.gold_7d)+"</span>","gold change, last 7 days","change");
@@ -2917,6 +3220,85 @@ let editingGoal=false;
 function fmtDate(iso){return new Date(iso+"T00:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})}
 // whole gold only, dropping silver/copper - matches the warband total card
 function gold(n){return Math.trunc(n).toLocaleString()+"g"}
+/* this week's gold (core addon v2.12+): net and gross since the weekly
+   reset, the weekly goal (set here or in game - the newest wins), and who
+   earned it */
+let editingWeekGoal=false;
+function renderWeekGold(){
+  const w=D.weekly,el=$("weekgold");if(!el)return;
+  if(!w){el.innerHTML="";return}
+  if(editingWeekGoal){
+    if($("wgform"))return;
+    el.innerHTML='<div class="goal"><div class="gt">Weekly gold goal</div><form id="wgform"><label>Gold this week<input type="number" id="wgamount" min="0" step="1" value="'+(w.goal?Math.round(w.goal/10000):"")+'" placeholder="e.g. 200000"></label>'+
+      '<button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-wgoal="cancel">Cancel</button>'+(w.goal?'<button class="btn" type="button" data-wgoal="clear">Remove goal</button>':"")+"</form>"+
+      '<div class="dim" style="margin-top:8px">It reaches the game after a /reload or your next login (the game reads add-on files only then). Setting it in game works too - the newest wins.</div></div>';
+    $("wgform").addEventListener("submit",async e=>{e.preventDefault();
+      try{await postJSON("/api/weekly-goal",{gold:parseInt($("wgamount").value||"0",10)})}catch(err){alert(err.message);return}
+      editingWeekGoal=false;load()});
+    $("wgamount").focus();return;
+  }
+  const sign=v=>(v>=0?"+":"-")+money(Math.abs(v));
+  const pct=w.goal?Math.max(0,Math.min(100,Math.floor(Math.max(0,w.net)*100/w.goal))):0;
+  const top=w.contributions.slice(0,8);
+  el.innerHTML='<div class="goal"><div class="gh"><div><div class="gt">This week</div><div class="dim" style="margin-top:4px">since the weekly reset · resets in '+durText(w.next-Date.now()/1000)+(w.partial?' · <span class="warn" title="Someone played this week was first seen after the reset, so their start is a guess.">partial data</span>':"")+"</div></div>"+
+    '<button class="btn" data-wgoal="edit">'+(w.goal?"Edit weekly goal":"Set weekly goal")+"</button></div>"+
+    '<div style="display:flex;gap:28px;flex-wrap:wrap;margin:10px 0 4px"><div><div style="font-size:22px;font-weight:650;color:'+(w.net>=0?"var(--good,#5c5)":"var(--bad,#d55)")+'">'+sign(w.net)+'</div><div class="dim">net - all characters and warband banks</div></div>'+
+    '<div><div style="font-size:22px;font-weight:650">'+sign(w.gross)+'</div><div class="dim" title="Only the gains count, so gold mailed between your own characters or taken from a warband bank counts as earned on the side that got it.">gross earned · includes gold moved between your characters</div></div></div>'+
+    (w.goal?'<div class="bar"><i style="width:'+pct+'%" data-pct="'+pct+'%"></i></div><div class="gd"><span>Goal <b>'+money(w.goal)+"</b> · "+pct+"%"+(w.goal_source==="game"?" · set in game":"")+"</span></div>":"")+
+    (top.length?'<div class="dim" style="margin-top:6px">'+top.map(r=>'<span style="margin-right:14px;white-space:nowrap"><span style="color:'+(r.class?cc(r.class):"inherit")+'">'+esc(r.name)+"</span> "+sign(r.delta)+"</span>").join("")+
+      (w.contributions.length>8?" · +"+(w.contributions.length-8)+" more":"")+"</div>":"")+"</div>";
+}
+
+/* custom tasks (core addon v2.12+): yours, for every character or one;
+   ticked in game (Todo window, Custom); written here and in game */
+function customDone(t,akey){
+  const ts=((D.custom.done||{})[akey]||{})[t.id];if(!ts)return false;
+  if(t.reset==="daily")return ts>=D.custom.daily_start;
+  if(t.reset==="weekly")return ts>=D.custom.weekly_start;
+  return true;
+}
+function renderCustom(){
+  const C=D.custom,el=$("custom");if(!el||!C)return;
+  const cols=D.characters.filter(c=>c.tracked&&c.addon_key).sort((a,b)=>b.level-a.level||a.name.localeCompare(b.name));
+  const scopeName=s=>{if(s==="global")return"all characters";const c=D.characters.find(x=>x.addon_key===s);return c?c.name:s.split("-")[0]};
+  const opts='<option value="global">All characters</option>'+D.characters.filter(c=>c.addon_key).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(c=>'<option value="'+esc(c.addon_key)+'">'+esc(c.name)+"</option>").join("");
+  let html='<div class="panel-h">Custom tasks <span class="dim" style="text-transform:none;letter-spacing:0">'+C.tasks.length+" of "+C.cap+"</span></div>"+
+    '<form id="ctform" class="controls" style="flex-wrap:wrap;gap:8px"><input id="cttext" maxlength="80" placeholder="New task, e.g. Craft flasks" style="flex:1;min-width:200px;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit">'+
+    '<select id="ctscope">'+opts+'</select><select id="ctreset"><option value="none">No reset</option><option value="daily">Resets daily</option><option value="weekly">Resets weekly</option></select>'+
+    '<button class="btn primary" type="submit">Add task</button></form>';
+  if(C.tasks.length){
+    const allDone=c=>{const mine=C.tasks.filter(t=>t.scope==="global"||t.scope===c.addon_key);return mine.length&&mine.every(t=>customDone(t,c.addon_key))};
+    html+='<div class="card scroll"><table><thead><tr><th>Task</th>'+cols.map(c=>'<th class="tc">'+nameHtml(c)+(allDone(c)?'<div class="good" title="Every task for this character is done">all done ✓</div>':"")+"</th>").join("")+"</tr></thead><tbody>"+
+      C.tasks.map(t=>"<tr><td><b>"+esc(t.text)+'</b><div class="realm">'+esc(scopeName(t.scope))+(t.reset!=="none"?" · resets "+t.reset:"")+(t.by==="game"?" · added in game":"")+' · <a href="#" style="color:var(--accent)" data-ctedit="'+esc(t.id)+'">edit</a> · <a href="#" style="color:var(--accent)" data-ctdel="'+esc(t.id)+'">delete</a></div></td>'+
+        cols.map(c=>{if(t.scope!=="global"&&t.scope!==c.addon_key)return'<td class="tc"><span class="faint">—</span></td>';
+          return'<td class="tc">'+(customDone(t,c.addon_key)?'<b style="color:var(--gold)">✓</b>':'<span class="faint">·</span>')+"</td>"}).join("")+"</tr>").join("")+
+      "</tbody></table></div>";
+  }
+  html+='<div class="hint">Tick tasks in game: the Todo window, Custom (you can add tasks there too). Tasks added or changed here reach the game after a /reload or your next login. Characters show here once the addon has seen them.</div>';
+  el.innerHTML=html;
+  $("ctform").addEventListener("submit",async e=>{e.preventDefault();
+    const text=$("cttext").value.trim();if(!text)return;
+    try{await postJSON("/api/custom-task",{action:"add",text,scope:$("ctscope").value,reset:$("ctreset").value})}catch(err){alert(err.message);return}
+    load()});
+}
+document.addEventListener("click",async e=>{
+  const a=e.target.dataset&&e.target.dataset.wgoal;
+  if(a){
+    if(a==="edit"){editingWeekGoal=true;renderWeekGold()}
+    else if(a==="cancel"){editingWeekGoal=false;renderWeekGold()}
+    else if(a==="clear"){try{await postJSON("/api/weekly-goal",{gold:0})}catch(err){alert(err.message);return}editingWeekGoal=false;load()}
+    return;
+  }
+  const del=e.target.dataset&&e.target.dataset.ctdel,ed=e.target.dataset&&e.target.dataset.ctedit;
+  if(del||ed)e.preventDefault();
+  if(del){if(!confirm("Delete this task for every character?"))return;
+    try{await postJSON("/api/custom-task",{action:"delete",id:del})}catch(err){alert(err.message);return}load();return}
+  if(ed){const t=D.custom.tasks.find(x=>x.id===ed);if(!t)return;
+    const text=prompt("Edit the task:",t.text);if(text===null||!text.trim())return;
+    try{await postJSON("/api/custom-task",{action:"edit",id:t.id,text:text.trim(),scope:t.scope,reset:t.reset})}catch(err){alert(err.message);return}load()}
+});
+
 function renderGoal(){
   const g=D.gold_goal,el=$("goal");
   if(editingGoal){
@@ -3127,6 +3509,7 @@ function renderWeekly(){
       '<div class="faint">Chosen in game: Professions panel, Cooldowns, Customize.</div></details>':"");
   const daily=periods.includes("daily")?"daily reset in "+resetText(T.next_daily).split(" · ")[0]+" · ":"";
   $("wcount").textContent=done+" of "+total+" done · "+daily+"weekly reset in "+resetText(T.next_weekly);
+  renderCustom();
 }
 async function setWeekly(key,item,done){
   try{await postJSON("/api/todo",{key,item,done})}catch(e){alert("Couldn't save: "+e.message);load();return}
@@ -3427,6 +3810,18 @@ document.addEventListener("click",async e=>{
     }catch(err){sb.disabled=false;sb.textContent="Try again";alert(err.message)}
     return;
   }
+  if(e.target.id==="copy-diag"){
+    const st=document.getElementById("diag-status"),box=document.getElementById("diag-text");
+    try{
+      const r=await fetch("/api/diagnostics");const j=await r.json();
+      const text=j.text+"\nBrowser: "+navigator.userAgent+"\nScreen: "+screen.width+"x"+screen.height+
+        " | clipboard: "+(!!(navigator.clipboard&&navigator.clipboard.writeText))+" | BroadcastChannel: "+("BroadcastChannel" in window);
+      box.value=text;box.hidden=false;
+      try{await navigator.clipboard.writeText(text);st.textContent="Copied - paste it into your report."}
+      catch(err){box.focus();box.select();st.textContent="This browser blocked copying - the text is selected below: press Ctrl+C."}
+    }catch(err){st.textContent="Couldn't gather diagnostics - is the app still running?"}
+    return;
+  }
   if(e.target.id!=="open-folder")return;
   try{await fetch("/api/open-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})}catch(err){}
 });
@@ -3624,17 +4019,101 @@ def data_card():
             '<a class="btn" href="/api/export" download>Export settings</a>'
             '<label class="btn" style="margin:0;display:inline-block;color:var(--text);font-size:14px">'
             'Import settings<input type="file" id="import-file" accept=".json,application/json" hidden></label>'
-            '<button class="btn" type="button" id="open-folder">Open data folder</button></div>'
+            '<button class="btn" type="button" id="open-folder">Open data folder</button>'
+            '<button class="btn" type="button" id="copy-diag">Copy diagnostics</button></div>'
             '<div class="hint" id="data-status">Importing replaces those choices; your current ones '
             'are saved first as settings-before-import.json in the data folder.</div>'
+            '<textarea id="diag-text" readonly hidden style="width:100%%;height:200px;margin-top:10px;'
+            'font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--bg);color:var(--text);'
+            'border:1px solid var(--line);border-radius:8px;padding:8px"></textarea>'
+            '<div class="hint" id="diag-status">Reporting a problem? Copy diagnostics and paste them with your report. '
+            'No character names, account names or file paths are included.</div>'
             '<div class="hint datapath">Data folder: <code>%s</code></div></div>'
             % html.escape(BASE_DIR))
+
+
+def _default_browser():
+    """The browser Windows opens links with (its own setting), e.g. "Opera GX"."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell"
+                            r"\Associations\UrlAssociations\https\UserChoice") as k:
+            prog = str(winreg.QueryValueEx(k, "ProgId")[0])
+    except Exception:
+        return "unknown"
+    known = (("OperaGX", "Opera GX"), ("Opera", "Opera"), ("MSEdge", "Microsoft Edge"), ("Chrome", "Google Chrome"),
+             ("Firefox", "Firefox"), ("Brave", "Brave"), ("Vivaldi", "Vivaldi"))
+    for key, name in known:
+        if key.lower() in prog.lower():
+            return name + " (" + prog + ")"
+    return prog
+
+
+def _ago(ts):
+    if not ts:
+        return "never"
+    s = max(0, int(time.time() - ts))
+    return ("%d min ago" % (s // 60)) if s < 7200 else ("%d h ago" % (s // 3600)) if s < 172800 else ("%d days ago" % (s // 86400))
+
+
+def diagnostics_text():
+    """What a bug report needs, and nothing personal: no character or
+    account names, no file paths, no Windows user name. (The account
+    folder names WoW uses can contain the account number, so they're
+    never included.)"""
+    lines = ["Forge's Ledger diagnostics"]
+    lines.append("App: %s (%s)" % (APP_VERSION, "exe" if getattr(sys, "frozen", False) else "running from source"))
+    try:
+        import platform
+        lines.append("Windows: %s" % platform.platform())
+    except Exception:
+        lines.append("Windows: unknown")
+    lines.append("Default browser: %s" % _default_browser())
+    cache = load_cache()
+    lines.append("Blizzard key set: %s | connected: %s" % ("yes" if has_credentials() else "no",
+                                                         "yes" if is_connected() else "no"))
+    lines.append("Last Blizzard sync: %s | characters in cache: %d" % (_ago(cache.get("synced_at")),
+                                                                     len(cache.get("characters", []))))
+    err = STATE.get("sync_error")
+    ss = sync_status()
+    if not err and ss.get("ok") is False:
+        err = ss.get("error")
+    if err:
+        err = str(err).replace(os.path.expanduser("~"), "%USERPROFILE%")
+    lines.append("Last sync error: %s" % (err or "none"))
+    if ss:
+        n = ss.get("notes") or {}
+        lines.append("Last sync attempt: %s (%s) | last success: %s | characters refreshed %s, no Blizzard data %s, failed %s" % (
+            _ago(ss.get("attempt_at")), "ok" if ss.get("ok") else "failed", _ago(ss.get("ok_at")),
+            n.get("ok", "?"), n.get("missing", "?"), n.get("failed", "?")))
+    root = wow_root()
+    lines.append("WoW folder found: %s | Forever clients: %d" % ("yes" if root else "no",
+                                                                 len(forever_clients(root)) if root else 0))
+    sv = find_sv_file()
+    lines.append("Addon save file found: %s%s" % ("yes" if sv else "no",
+                                                  (" | last written " + _ago(os.path.getmtime(sv))) if sv else ""))
+    try:
+        st = addon_status(load_settings().get("wow_path") or root or "")
+        lines.append("Core addon: installed %s, bundled %s" % (st.get("installed") or "no", st.get("bundled") or "?"))
+    except Exception:
+        lines.append("Core addon: unknown")
+    try:
+        for sat in satellite_status(load_settings().get("wow_path") or root or ""):
+            lines.append("%s: installed %s, bundled %s" % (sat["title"], sat["installed"] or "no", sat["bundled"] or "?"))
+    except Exception:
+        pass
+    upd = _read_update_state()
+    lines.append("Update check: latest %s, checked %s" % (upd.get("latest") or "unknown", _ago(upd.get("checked_at"))))
+    st = load_settings()
+    lines.append("Tracked characters: %d | accounts picked: %d" % (len(st.get("tracked") or []), len(st.get("accounts") or [])))
+    return "\n".join(lines)
 
 
 def export_settings():
     """The portable part of your data: choices only, no login, no Blizzard data."""
     st = load_settings()
-    keep = ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx")
+    keep = ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx",
+            "weekly_goal", "custom_tasks", "custom_deleted")
     return {"app": "ForgesLedger", "format": 1, "appVersion": APP_VERSION,
             "exportedAt": int(time.time()),
             "settings": {k: st[k] for k in keep if k in st},
@@ -3682,10 +4161,19 @@ def import_settings(doc):
     with open(os.path.join(BASE_DIR, "settings-before-import.json"), "w", encoding="utf-8") as f:
         json.dump(export_settings(), f, indent=2)
     current = load_settings()
-    for k in ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx"):
+    if "custom_tasks" in st and not (isinstance(st["custom_tasks"], list)
+                                     and all(isinstance(t, dict) and t.get("id") and isinstance(t.get("text"), str)
+                                             for t in st["custom_tasks"])):
+        return "The settings file has invalid custom tasks."
+    for k in ("tracked", "gold_goal", "forever_gold_goal", "accounts", "todo", "theme", "theme_fx",
+              "weekly_goal", "custom_tasks", "custom_deleted"):
         if k in st:
             current[k] = st[k]
     save_settings(current)
+    try:
+        write_companion(current)
+    except OSError:
+        pass
     save_roles(roles)
     return None
 
@@ -3868,6 +4356,8 @@ def build_api_data():
         gold, sv_path, warbands = load_gold()
         warbands_all = dict(warbands)
         warbands.pop("__events__", None)  # calendar events, not a bank
+        warbands.pop("__goal__", None)    # the weekly goal set in game
+        warbands.pop("__custom__", None)  # custom tasks from game
     except Exception as e:
         # a save file we can't read shouldn't take the whole dashboard down -
         # show the Blizzard data and say what went wrong instead
@@ -3939,6 +4429,7 @@ def build_api_data():
         ignored = cooldown_ignores(((c.get("sat") or {}).get("professions") or {}).get("cooldownPrefs"))
         cds = g.get("cooldowns", [])
         c["cooldowns"] = [cd for cd in cds if cd.get("id") not in ignored]
+        c["addon_key"] = g.get("addon_key")
         c["cooldowns_ignored"] = [cd for cd in cds if cd.get("id") in ignored]
         c["todo"] = todo_auto(c, g.get("todo"))
         c["has_addon"] = bool(g)
@@ -3987,6 +4478,7 @@ def build_api_data():
         "connected": is_connected(),
         "syncing": STATE["syncing"],
         "sync_error": STATE["sync_error"],
+        "sync_status": sync_status(),
         "sv_path": sv_path,
         "sv_mtime": STATE["sv_mtime"],
         "addon_error": addon_error,
@@ -4008,6 +4500,9 @@ def build_api_data():
             if gold_7d != 0 else "—",
         },
         "gold_goal": gold_goal_status(settings["gold_goal"], goal_series, gold_total),
+        "weekly": weekly_status({k: g for k, g in gold.items() if k in shown}, warbands, settings,
+                                warbands_all.get("__goal__")),
+        "custom": custom_view(settings, warbands_all.get("__custom__")),
         "game": "retail", "cap": CAP, "classes": ALL_CLASSES,
         "forever_available": bool(forever_clients()),
         "satellites": satellites_summary(sats),
@@ -4279,6 +4774,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(reps_payload([c for c in chars if c["key"] == key], cache, key))
             return
 
+        if path == "/api/diagnostics":
+            try:
+                self.send_json({"text": diagnostics_text()})
+            except Exception as e:
+                self.send_json({"text": "Forge's Ledger diagnostics\nApp: %s\n(gathering failed: %s)" % (APP_VERSION, type(e).__name__)})
+            return
+
         if path == "/api/export":
             body = json.dumps(export_settings(), indent=2).encode("utf-8")
             self.send_response(200)
@@ -4473,6 +4975,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if parsed.path == "/api/weekly-goal":
+            req = read_json_body(self, body)
+            if req is None:
+                return self.send_json({"error": "bad request"}, 400)
+            try:
+                gold = int(req.get("gold") or 0)
+            except (TypeError, ValueError):
+                return self.send_json({"error": "The goal must be a whole number of gold."}, 400)
+            if gold < 0 or gold > 10 ** 9:
+                return self.send_json({"error": "That goal is out of range."}, 400)
+            st = load_settings()
+            st["weekly_goal"] = {"copper": gold * 10000, "at": int(time.time())}
+            save_settings(st)
+            where = None
+            try:
+                where = write_companion(st)
+            except OSError as e:
+                print("Couldn't write the companion data: %s" % e, flush=True)
+            return self.send_json({"ok": True, "in_game": bool(where)})
+
+        if parsed.path == "/api/custom-task":
+            req = read_json_body(self, body)
+            if req is None:
+                return self.send_json({"error": "bad request"}, 400)
+            st = load_settings()
+            tasks = [t for t in (st.get("custom_tasks") or []) if isinstance(t, dict)]
+            deleted = dict(st.get("custom_deleted") or {})
+            action = req.get("action")
+            now = int(time.time())
+            text = str(req.get("text") or "").strip()[:80]
+            scope = str(req.get("scope") or "global")
+            reset = req.get("reset") if req.get("reset") in ("none", "daily", "weekly") else "none"
+            if scope != "global" and not re.match(r"^[^-\s]+-\S+$", scope):
+                return self.send_json({"error": "Unknown character."}, 400)
+            if action == "add":
+                if not text:
+                    return self.send_json({"error": "Type the task first."}, 400)
+                live = custom_view(st, None)["tasks"]
+                if len(live) >= MAX_CUSTOM_TASKS:
+                    return self.send_json({"error": "That's the limit of %d tasks - delete one first." % MAX_CUSTOM_TASKS}, 400)
+                tasks.append({"id": "a%d%04d" % (now, random.randint(0, 9999)), "text": text, "scope": scope,
+                              "reset": reset, "at": now})
+            elif action == "edit":
+                tid = str(req.get("id") or "")
+                if not tid or not text:
+                    return self.send_json({"error": "Nothing to edit."}, 400)
+                # editing a game-made task: the app's copy (same id) wins in game
+                tasks = [t for t in tasks if str(t.get("id")) != tid]
+                tasks.append({"id": tid, "text": text, "scope": scope, "reset": reset, "at": now})
+            elif action == "delete":
+                tid = str(req.get("id") or "")
+                tasks = [t for t in tasks if str(t.get("id")) != tid]
+                deleted[tid] = now
+            else:
+                return self.send_json({"error": "Unknown action."}, 400)
+            st["custom_tasks"], st["custom_deleted"] = tasks, deleted
+            save_settings(st)
+            where = None
+            try:
+                where = write_companion(st)
+            except OSError as e:
+                print("Couldn't write the companion data: %s" % e, flush=True)
+            return self.send_json({"ok": True, "in_game": bool(where)})
+
         if parsed.path == "/api/goal":
             req = read_json_body(self, body)
             if req is None:
@@ -4640,6 +5206,11 @@ def main():
         if not is_connected():
             print("Battle.net login expired - character details still update; "
                   "Connect for new characters, mounts and pets.")
+    try:
+        if write_companion():
+            print("Companion data written for the addon (ForgesLedger_Companion).", flush=True)
+    except OSError as e:
+        print("Couldn't write the companion data: %s" % e, flush=True)
     threading.Thread(target=watch_addon_file, daemon=True).start()
     threading.Thread(target=auto_sync_loop, daemon=True).start()
     # right away, not after auto_sync_loop's start-up pause, so a new

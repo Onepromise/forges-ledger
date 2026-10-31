@@ -19,3 +19,6 @@ build/
 *.spec
 __pycache__/
 *.pyc
+
+# Written next to the script when running from source
+sync_status.json
