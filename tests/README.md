@@ -8,6 +8,7 @@ real data.
 | `python -m unittest discover -s tests -v` | The desktop app: sync hardening, weekly gold, custom tasks, the companion addon file, diagnostics |
 | `python tests/lua/run.py addon` | Forge's Ledger (core bar and windows), Professions and Dungeons, driven in a mock WoW client |
 | `python tests/lua/chron_run.py addon` | Forge's Chronicle, the same way |
+| `python tests/lua/pug_run.py addon` | PUG Lyfe, with a fake party/raid API |
 
 The Lua suites need `pip install lupa`. `tests/lua/wowmock.lua` is the stand-in
 for the game's UI; a widget method it doesn't know fails loudly, so a typo can't

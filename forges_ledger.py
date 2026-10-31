@@ -117,6 +117,16 @@ SATELLITES = {
         "pitch": "an automatic adventure journal in game: your character's firsts and milestones, screenshots of the big moments, and a recap to share",
         "games": ["retail", "forever"],
     },
+    # a standalone addon too: a private, account-wide list of group-mates you
+    # rated; the dashboard only installs it (its data is players, not characters)
+    "puglyfe": {
+        "folder": "PugLyfe",
+        "db": "PugLyfeDB",
+        "schema": 1,
+        "title": "PUG Lyfe",
+        "pitch": "a private list of the players you group with: rate them, add a note, and get a reminder when you meet them again",
+        "games": ["retail", "forever"],
+    },
 }
 
 # Roles you can tag a character with on the dashboard (stored in ROLES_PATH).

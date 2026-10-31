@@ -11,7 +11,9 @@ for m in ([[SetPoint SetScript GetScript Hide Show IsShown SetShown CreateTextur
   StartMoving SetWordWrap SetVerticalScroll SetValue SetToplevel SetTexture SetTexCoord
   SetStatusBarTexture SetScrollChild SetMinMaxValues SetJustifyH SetFontObject SetBackdropColor
   SetBackdrop RegisterForClicks Raise GetStringWidth GetPoint GetName SetOwner AddLine AddDoubleLine
-  SetParent GetParent SetFrameLevel SetLooping SetFromAlpha SetToAlpha SetDuration SetOrder GetStringHeight SetHorizTile SetVertTile SetAutoFocus SetMaxLetters SetFocus ClearFocus HighlightText HasFocus]]):gmatch("%S+") do KNOWN[m] = true end
+  SetParent GetParent SetFrameLevel SetLooping SetFromAlpha SetToAlpha SetDuration SetOrder GetStringHeight SetHorizTile SetVertTile SetAutoFocus SetMaxLetters SetFocus ClearFocus HighlightText HasFocus
+  SetScale EnableMouseWheel SetMultiLine SetJustifyV SetOrientation SetValueStep SetObeyStepOnDrag SetThumbTexture
+  SetPropagateKeyboardInput EnableKeyboard SetVertexColor SetObeyStepOnDrag]]):gmatch("%S+") do KNOWN[m] = true end
 
 ALL_FRAMES = {}
 EVENT_FRAMES = {}
@@ -45,6 +47,10 @@ function Widget:SetText(t) self._text = t == nil and "" or tostring(t) end
 function Widget:GetText() return self._text end
 function Widget:GetStringWidth() return #(self._text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", "XX")) * 7 end
 function Widget:GetStringHeight() local _, n = self._text:gsub("\n", ""); return (n + 1) * 12 end
+function Widget:SetFontObject(o) self._font = o end
+function Widget:HasFocus() return false end
+function Widget:SetFocus() FOCUSED = self end
+function Widget:GetThumbTexture() self._thumb = self._thumb or CreateFrame('Texture'); return self._thumb end
 function Widget:SetWidth(w) self._w = w end
 function Widget:GetWidth() return self._w end
 function Widget:SetHeight(h) self._h = h end

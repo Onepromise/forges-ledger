@@ -21,3 +21,5 @@ jobs:
         run: python tests/lua/run.py addon
       - name: Addon tests (Forge's Chronicle)
         run: python tests/lua/chron_run.py addon
+      - name: Addon tests (PUG Lyfe)
+        run: python tests/lua/pug_run.py addon

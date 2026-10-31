@@ -1,0 +1,9 @@
+## Interface: 120000, 120100, 120105, 16001
+## Title: PUG Lyfe
+## Notes: Your private PUG journal. Rate the players you group with and leave yourself a note; next time they join your group, a small reminder tells you what you thought. Personal only: nothing is shared. Type /pug to open it.
+## Author: Forge at Crescent Cove
+## Version: 1.0
+## X-Website: https://thecrescentcove.com
+## IconTexture: Interface\AddOns\PugLyfe\Media\pug
+## SavedVariables: PugLyfeDB
+PugLyfe.lua
