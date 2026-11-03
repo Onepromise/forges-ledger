@@ -195,6 +195,9 @@ local function Create(id)
     f.title:SetPoint("TOPLEFT", 12, -8)
     f.title:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    -- hide the frame directly: the template's own click goes through Blizzard's
+    -- panel manager, which can refuse in combat (the window then won't close)
+    close:SetScript("OnClick", function() f:Hide() end)
     close:SetPoint("TOPRIGHT", 2, 2)
 
     local sf = CreateFrame("ScrollFrame", name .. "Scroll", f, "UIPanelScrollFrameTemplate")

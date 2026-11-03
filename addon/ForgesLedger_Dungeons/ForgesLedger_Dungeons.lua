@@ -563,6 +563,9 @@ local function CreatePanel()
         g:SetPoint("TOPLEFT", 1, -i); g:SetPoint("TOPRIGHT", -1, -i); g:SetHeight(1)
     end
     local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
+    -- hide the frame directly: the template's own click goes through Blizzard's
+    -- panel manager, which can refuse in combat (the window then won't close)
+    close:SetScript("OnClick", function() panel:Hide() end)
     close:SetPoint("TOPRIGHT", 2, 2)
     -- the tribute: just text, so it can't take a click
     panel.tribute = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")

@@ -402,5 +402,16 @@ class WeeklyAndCustom(TempData):
         self.assertEqual(F._cooldowns({"370714": {"name": "T", "profession": "Alchemy", "readyAt": 5}})[0]["id"], 370714)
 
 
+class AddonCloseButtons(unittest.TestCase):
+    def test_close_buttons_hide_their_frame_directly(self):
+        """The UIPanelCloseButton template closes through Blizzard's panel
+        manager, which can refuse in combat; every one of ours overrides it."""
+        import glob, re
+        for path in glob.glob(os.path.join(ROOT, "addon", "*", "*.lua")):
+            src = open(path, encoding="utf-8").read()
+            for m in re.finditer(r'local (\w+) = CreateFrame\("Button", nil, \w+, "UIPanelCloseButton"\)', src):
+                self.assertIn(m.group(1) + ':SetScript("OnClick"', src, "%s: %s" % (path, m.group(1)))
+
+
 if __name__ == "__main__":
     unittest.main()

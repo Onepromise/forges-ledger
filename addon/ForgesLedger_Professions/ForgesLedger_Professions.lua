@@ -1337,6 +1337,9 @@ local function CreateHub()
         g:SetHeight(1)
     end
     local close = CreateFrame("Button", nil, hub, "UIPanelCloseButton")
+    -- hide the frame directly: the template's own click goes through Blizzard's
+    -- panel manager, which can refuse in combat (the window then won't close)
+    close:SetScript("OnClick", function() hub:Hide() end)
     close:SetPoint("TOPRIGHT", 2, 2)
     local sb = CreateFrame("Button", nil, hub)  -- placed by Render, after the tabs
     sb:SetSize(108, 22)
