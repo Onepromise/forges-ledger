@@ -5,5 +5,6 @@
 ## Version: 1.0
 ## X-Website: https://thecrescentcove.com
 ## IconTexture: Interface\AddOns\PugLyfe\Media\pug
+## OptionalDeps: ForgesLedger
 ## SavedVariables: PugLyfeDB
 PugLyfe.lua

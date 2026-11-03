@@ -1148,6 +1148,49 @@ local function ReportTarget(rating, rest, isNote)
     print(PREFIX .. Label(rec) .. ": " .. RatingText(rec.rating) .. (rec.note and ("  -  " .. rec.note) or ""))
 end
 
+------------------------------------------------------------ the Ledger bar ---
+-- With Forge's Ledger installed, PUG Lyfe gets a segment on its bar: a click
+-- opens the list, hovering shows who you rated most recently. Display only.
+
+if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "function" then
+    ForgesLedger.RegisterBarPlugin({
+        id = "puglyfe", label = "PUG Lyfe", order = 80,
+        updateEvents = { "GROUP_ROSTER_UPDATE" },
+        text = function() return "PUG Lyfe" end,
+        roster = function()
+            local up, down, list = 0, 0, {}
+            for key, rec in pairs(DB().players) do
+                if rec.rating == "up" then up = up + 1 elseif rec.rating == "down" then down = down + 1 end
+                if Known(rec) then tinsert(list, rec) end
+            end
+            table.sort(list, function(a, b) return (a.ratedAt or a.lastSeen or 0) > (b.ratedAt or b.lastSeen or 0) end)
+            local rows = {}
+            if up + down > 0 then
+                tinsert(rows, { name = "Rated", value = up .. " group again  \194\183  " .. down .. " avoid",
+                                valueColor = { 0.92, 0.90, 0.85 } })
+                tinsert(rows, { section = "Latest" })
+            end
+            for i, rec in ipairs(list) do
+                if i > 6 then break end
+                tinsert(rows, { name = Label(rec), class = rec.class,
+                                value = RatingText(rec.rating) .. "  \194\183  " .. Ago(rec.lastSeen),
+                                valueColor = rec.rating == "down" and RUST or rec.rating == "up" and GREEN or DIM,
+                                sub = (type(rec.note) == "string" and rec.note ~= "") and rec.note or nil })
+            end
+            local footer = {}
+            if #list > 6 then tinsert(footer, "+" .. (#list - 6) .. " more - click to open") end
+            return { title = "PUG Lyfe", rows = rows, footer = footer, noAsOf = true,
+                     empty = "Nobody rated yet - /pug up or /pug down on your target." }
+        end,
+        onClick = function() ToggleWindow() end,
+        open = function(toggle)
+            if toggle then ToggleWindow(); return win and win:IsShown() or false end
+            ToggleWindow(true)
+            return true
+        end,
+    })
+end
+
 SLASH_PUGLYFE1 = "/pug"
 SLASH_PUGLYFE2 = "/puglyfe"
 SlashCmdList.PUGLYFE = function(msg)

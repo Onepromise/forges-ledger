@@ -392,6 +392,15 @@ check("clicking 'The rest is unwritten' writes another page", len(entries(L)) ==
 ev(L, 'SlashCmdList.FORGESCHRONICLE("export"); local b = ForgesChronicleJournal.recap.b2; b._scripts.OnClick(b)')
 check("your pages and words are in the full timeline", "Met a tauren who sold me a fish." in L.eval("ForgesChronicleJournal.recap.text:GetText()"))
 
+L = run("Chronicle: the Ledger bar", before='ForgesLedger = { RegisterBarPlugin = function(d) BARPLUGIN = d; return true end }')
+check("it registers a bar segment", L.eval("BARPLUGIN and BARPLUGIN.id") == "chronicle")
+card = L.eval("BARPLUGIN.roster()")
+check("the hover card lists your pages", len(card.rows) >= 1 and card.noAsOf, len(card.rows))
+L.execute("BARPLUGIN.onClick()")
+check("clicking the segment opens the journal", L.eval("ForgesChronicleJournal:IsShown()"))
+L.execute("BARPLUGIN.onClick()")
+check("and again closes it", not L.eval("ForgesChronicleJournal:IsShown()"))
+
 print("\n%d passed" % passes)
 print("FAILURES:", fails if fails else "none")
 sys.exit(1 if fails else 0)

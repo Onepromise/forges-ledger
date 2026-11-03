@@ -268,7 +268,8 @@ end
 --                 pulse = true },        -- optional: gentle "ready" pulse
 --               { section = "Keys" }, ... }, -- a gold heading between groups
 --     empty  = "All cooldowns used.",    -- shown when there are no rows
---     footer = { "+3 more" } }           -- optional grey lines
+--     footer = { "+3 more" },            -- optional grey lines
+--     noAsOf = true }                    -- optional: leave off the line below
 -- Every card ends with "As of each character's last login." - the addon
 -- only knows what it saw when each character was last played.
 
@@ -458,7 +459,7 @@ local function Layout(data)
     -- footer: the plugin's notes, then the honesty line every card carries
     local lines = {}
     for _, l in ipairs(type(data.footer) == "table" and data.footer or {}) do tinsert(lines, tostring(l)) end
-    tinsert(lines, "As of each character's last login.")
+    if not data.noAsOf then tinsert(lines, "As of each character's last login.") end
     y = y - 6
     for i, text in ipairs(lines) do
         local f = Foot(i)

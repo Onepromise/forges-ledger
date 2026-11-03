@@ -1434,6 +1434,45 @@ local function ToggleJournal(show)
     end
 end
 
+------------------------------------------------------------ the Ledger bar ---
+-- With Forge's Ledger installed, the Chronicle gets a segment on its bar: a
+-- click opens the journal, hovering shows the latest pages. Display only.
+
+local function EntryAgo(t)
+    local d = (time() - (tonumber(t) or 0)) / 86400
+    if d < 1 then return "today" end
+    if d < 2 then return "yesterday" end
+    if d < 60 then return math.floor(d) .. " days ago" end
+    return date("%b %d", t)
+end
+
+if type(ForgesLedger) == "table" and type(ForgesLedger.RegisterBarPlugin) == "function" then
+    ForgesLedger.RegisterBarPlugin({
+        id = "chronicle", label = "Chronicle", order = 70,
+        text = function() return "Chronicle" end,
+        roster = function()
+            local entries = c and c.data.entries or {}
+            local rows = {}
+            for i = #entries, math.max(1, #entries - 5), -1 do
+                local e = entries[i]
+                tinsert(rows, { name = tostring(e.title or "A page"),
+                                value = EntryAgo(e.at), valueColor = { 0.92, 0.90, 0.85 },
+                                pulse = e.tier == "first" and (time() - (tonumber(e.at) or 0)) < 86400 })
+            end
+            local footer = {}
+            if #entries > 6 then tinsert(footer, #entries .. " pages in all - click to open") end
+            return { title = JournalTitle(), rows = rows, footer = footer, noAsOf = true,
+                     empty = "No pages yet - your story starts here." }
+        end,
+        onClick = function() ToggleJournal() end,
+        open = function(toggle)
+            if toggle then ToggleJournal(); return journal and journal:IsShown() or false end
+            ToggleJournal(true)
+            return true
+        end,
+    })
+end
+
 ------------------------------------------------------- chapter ceremony ---
 -- Crossing into a new chapter: a full-screen spread with the chapter's
 -- name and its epigraph, once per chapter. Any click or key dismisses it.
