@@ -4,6 +4,7 @@
 ## Author: Forge at Crescent Cove
 ## Version: 1.3
 ## X-Website: https://thecrescentcove.com
+## X-Curse-Project-ID: 1775671
 ## OptionalDeps: ForgesLedger
 ## SavedVariables: ForgesChronicleDB
 ForgesChronicle.lua
