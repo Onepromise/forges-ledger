@@ -737,7 +737,7 @@ end
 
 local SETTING_ROWS = {
     { "askAfter", "Ask me to rate after a group" },
-    { "popup", "Remind me when I group with someone I've rated" },
+    { "popup", "Remind me when I group with a player I've rated" },
     { "targetPopup", "Remind me when I target them" },
     { "tooltip", "Add a line to their tooltip" },
     { "skipKnown", "Skip guildmates and friends" },
@@ -950,27 +950,35 @@ local function CreateWindow()
     sp:SetPoint("TOPLEFT", PX, -82)
     sp:SetPoint("BOTTOMRIGHT", -12, 12)
     win.settings = sp
+    if sp.SetClipsChildren then sp:SetClipsChildren(true) end  -- nothing can spill past the border
     sp.toggles = {}
     local y = -8
     for _, t in ipairs(SETTING_ROWS) do
+        -- both edges are pinned to the panel, so a row can never be wider than
+        -- the window; the label stops short of the toggle and wraps to two lines
         local row = CreateFrame("Button", nil, sp)
-        row:SetPoint("TOPLEFT", 4, y)
-        row:SetPoint("RIGHT", sp, "RIGHT", -4, 0)
-        row:SetHeight(24)
+        row:SetPoint("TOPLEFT", sp, "TOPLEFT", 4, y)
+        row:SetPoint("TOPRIGHT", sp, "TOPRIGHT", -4, y)
+        row:SetHeight(32)
         Tex(row, "HIGHLIGHT", { 1, 1, 1, 0.05 }):SetAllPoints()
-        local l = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        l:SetPoint("LEFT", 2, 0)
-        l:SetText(t[2])
         local st = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        st:SetPoint("RIGHT", -4, 0)
+        st:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+        st:SetWidth(30)
+        st:SetJustifyH("RIGHT")
+        local l = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        l:SetPoint("LEFT", row, "LEFT", 4, 0)
+        l:SetPoint("RIGHT", st, "LEFT", -8, 0)
+        l:SetJustifyH("LEFT")
+        l:SetWordWrap(true)
+        l:SetText(t[2])
         row:SetScript("OnClick", function()
             local s = Settings()
             s[t[1]] = not s[t[1]]
             if t[1] == "minimap" and UpdateMinimap then UpdateMinimap() end
             RenderSettings()
         end)
-        tinsert(sp.toggles, { key = t[1], state = st })
-        y = y - 28
+        tinsert(sp.toggles, { key = t[1], state = st, label = l })
+        y = y - 36
     end
     local ex = Btn(sp, "Export my notes", 130)
     ex:SetPoint("TOPLEFT", 4, y - 12)

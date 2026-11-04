@@ -394,6 +394,21 @@ check("clicking the segment opens the list", shown(L, "PugLyfeWindow"))
 L.execute("BARPLUGIN.onClick()")
 check("and again closes it", not shown(L, "PugLyfeWindow"))
 
+# the Settings rows stay inside the window (BUG PUG-1)
+L = run("PUG Lyfe: settings layout")
+ev(L, "SlashCmdList.PUGLYFE('')")
+ev(L, "PugLyfeWindow.gear._scripts.OnClick(PugLyfeWindow.gear)")
+ok = True
+for i in range(1, 7):
+    ok = ok and L.eval("""(function()
+        local t = PugLyfeWindow.settings.toggles[%d]
+        local row, sp = t.state._parent, PugLyfeWindow.settings
+        local function pts(f) local o = {} for _, p in ipairs(f._points or {}) do o[p[1]] = p[2] end return o end
+        local rp = pts(row)
+        return rp.TOPRIGHT == sp and rp.TOPLEFT == sp
+    end)()""" % i)
+check("every settings row is pinned to both edges of the panel", ok)
+
 print("\n%d passed" % passes)
 print("FAILURES:", fails if fails else "none")
 sys.exit(1 if fails else 0)

@@ -12,7 +12,7 @@ for m in ([[SetPoint SetScript GetScript Hide Show IsShown SetShown CreateTextur
   SetStatusBarTexture SetScrollChild SetMinMaxValues SetJustifyH SetFontObject SetBackdropColor
   SetBackdrop RegisterForClicks Raise GetStringWidth GetPoint GetName SetOwner AddLine AddDoubleLine
   SetParent GetParent SetFrameLevel SetLooping SetFromAlpha SetToAlpha SetDuration SetOrder GetStringHeight SetHorizTile SetVertTile SetAutoFocus SetMaxLetters SetFocus ClearFocus HighlightText HasFocus
-  SetScale EnableMouseWheel SetMultiLine SetJustifyV SetOrientation SetValueStep SetObeyStepOnDrag SetThumbTexture
+  SetClipsChildren SetScale EnableMouseWheel SetMultiLine SetJustifyV SetOrientation SetValueStep SetObeyStepOnDrag SetThumbTexture
   SetPropagateKeyboardInput EnableKeyboard SetVertexColor SetObeyStepOnDrag]]):gmatch("%S+") do KNOWN[m] = true end
 
 ALL_FRAMES = {}
