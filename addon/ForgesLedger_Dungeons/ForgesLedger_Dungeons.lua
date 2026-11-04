@@ -19,7 +19,7 @@
 --   * no work every frame: it reads on login and when the game reports a
 --     change (a run finished, a boss died, your bags changed)
 
-local VERSION = "1.1"
+local VERSION = "1.2"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Dungeons]|r "
 

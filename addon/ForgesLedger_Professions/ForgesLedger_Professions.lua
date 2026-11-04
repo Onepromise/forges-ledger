@@ -18,7 +18,7 @@
 --     never overwrite each other
 
 local ADDON_NAME = "ForgesLedger_Professions"
-local VERSION = "1.11"
+local VERSION = "1.12"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Ledger: Professions]|r "
 

@@ -2,7 +2,7 @@
 ## Title: Forge's Chronicle
 ## Notes: An automatic adventure journal: your character's firsts and milestones - first epic, first dungeon, max level and more - written into a timeline as they happen, with a screenshot of the big moments. Type /chronicle to open it.
 ## Author: Forge at Crescent Cove
-## Version: 1.2
+## Version: 1.3
 ## X-Website: https://thecrescentcove.com
 ## OptionalDeps: ForgesLedger
 ## SavedVariables: ForgesChronicleDB

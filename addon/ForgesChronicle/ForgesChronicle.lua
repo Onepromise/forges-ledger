@@ -29,7 +29,7 @@
 -- different functions; one save file per account with a "characters" list;
 -- no work every frame.
 
-local VERSION = "1.2"
+local VERSION = "1.3"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Forge's Chronicle]|r "
 local DEFAULT_TITLE = "Forge's Chronicle"
