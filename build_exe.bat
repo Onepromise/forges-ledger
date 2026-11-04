@@ -10,6 +10,11 @@ rem addon\ForgesLedger and bump its "## Version" line.
 
 setlocal
 cd /d "%~dp0"
+rem unreleased addons stay out of the app's bundled copy (PUG Lyfe)
+set STAGE=%LOCALAPPDATA%\ForgesLedgerBuild\addon_stage
+if exist "%STAGE%" rmdir /s /q "%STAGE%"
+robocopy "%~dp0addon" "%STAGE%" /E /XD PugLyfe /NFL /NDL /NJH /NJS >nul
+if errorlevel 8 goto :fail
 set BUILD=%LOCALAPPDATA%\ForgesLedgerBuild
 set VENV=%BUILD%\venv
 
@@ -28,7 +33,7 @@ rem from --specpath, not from this folder)
 "%VENV%\Scripts\pyinstaller.exe" --noconfirm --clean --onefile --console ^
     --name ForgesLedger ^
     --icon "%~dp0forges-ledger.ico" ^
-    --add-data "%~dp0addon;addon" ^
+    --add-data "%STAGE%;addon" ^
     --add-data "%~dp0PRIVACY.md;." ^
     --add-data "%~dp0forges-ledger.ico;." ^
     --add-data "%~dp0forges-ledger-anvil.png;." ^

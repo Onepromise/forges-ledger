@@ -47,7 +47,7 @@ REGIONS = {"us": "Americas & Oceania", "eu": "Europe",
            "kr": "Korea", "tw": "Taiwan"}
 CAP = 90  # Midnight max level
 
-APP_VERSION = "0.18.0"  # bump for each GitHub release (tag v<APP_VERSION>)
+APP_VERSION = "0.18.1"  # bump for each GitHub release (tag v<APP_VERSION>)
 APP_NAME = "ForgesLedger"  # folder name for user data; no Blizzard trademarks
 OLD_APP_NAME = "ForgeDashboard"  # data folder name before the rename
 
@@ -117,16 +117,7 @@ SATELLITES = {
         "pitch": "an automatic adventure journal in game: your character's firsts and milestones, screenshots of the big moments, and a recap to share",
         "games": ["retail", "forever"],
     },
-    # a standalone addon too: a private, account-wide list of group-mates you
-    # rated; the dashboard only installs it (its data is players, not characters)
-    "puglyfe": {
-        "folder": "PugLyfe",
-        "db": "PugLyfeDB",
-        "schema": 1,
-        "title": "PUG Lyfe",
-        "pitch": "a private list of the players you group with: rate them, add a note, and get a reminder when you meet them again",
-        "games": ["retail", "forever"],
-    },
+    # PUG Lyfe (addon/PugLyfe) is unreleased: add its entry back here when it launches
 }
 
 # Roles you can tag a character with on the dashboard (stored in ROLES_PATH).
