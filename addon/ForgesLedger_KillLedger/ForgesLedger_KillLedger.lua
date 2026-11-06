@@ -104,9 +104,26 @@ end
 
 local function NpcId(guid)
     if type(guid) ~= "string" then return nil end
-    local kind, id = guid:match("^(%a+)%-%d+%-%d+%-%d+%-%d+%-(%d+)")
+    -- Creature-0-<server>-<instance>-<zone>-<npcId>-<spawn>: the npc id is the
+    -- 6th field. The fields before it aren't assumed to be plain numbers.
+    local kind, id = guid:match("^(%a+)%-[^%-]*%-[^%-]*%-[^%-]*%-[^%-]*%-(%d+)")
     if kind == "Creature" or kind == "Vehicle" then return id end
     return nil
+end
+
+-- What the counters saw (shown by /kl debug): where kills come from, and what
+-- got thrown away and why. Nothing here is saved.
+local DBG = { cleu = 0, secret = 0, noGuid = 0, parseFail = 0, ownPet = 0, notGroup = 0,
+              loots = 0, lootCredited = 0, lootLive = 0, shapes = {},
+              via = { combatlog = 0, tag = 0, target = 0, loot = 0 } }
+local function Shape(guid)
+    local s = tostring(guid):gsub("%d+", "N"):gsub("%x%x%x%x%x%x%x+", "H")
+    return s
+end
+local function NoteShape(guid)
+    local sh = Shape(guid)
+    for _, v in ipairs(DBG.shapes) do if v == sh then return end end
+    if #DBG.shapes < 6 then tinsert(DBG.shapes, sh) end
 end
 
 local function ItemId(link)
@@ -180,7 +197,7 @@ end
 local panel, Render  -- the panel code below
 
 -- Credit one kill. `name` may be nil (the loot window knows the name better).
-local function CreditKill(guid, name)
+local function CreditKill(guid, name, via)
     local npc = NpcId(guid)
     if not npc or recentKills[guid] then return end
     local zone = ZoneName()
@@ -194,6 +211,7 @@ local function CreditKill(guid, name)
     end
     recentKills[guid] = { npc = npc, name = name, zone = zone, at = time(), looted = false }
     killCount = killCount + 1
+    if via then DBG.via[via] = (DBG.via[via] or 0) + 1 end
     c.exportedAt = time()
     if panel and panel:IsShown() then Render() end
 end
@@ -229,12 +247,20 @@ local function ReadLoot()
     local c = CharData()
     local d = c.data
     local changed = false
+    DBG.loots = DBG.loots + 1
     for guid in pairs(touched) do
         local k = recentKills[guid]
-        -- no combat log: a corpse's first loot window is the kill
-        if not k and ForgesLedgerKillLedgerDB.countMode ~= "combatlog" then
-            CreditKill(guid, nil)
-            k = recentKills[guid]
+        -- a corpse you can loot is a kill of yours, whatever else did or didn't
+        -- see it die (KL-3). Not while it is still alive and targeted: that is
+        -- a pickpocket, not a kill.
+        if not k then
+            if Try(UnitGUID, "target") == guid and not Plain(Try(UnitIsDead, "target")) then
+                DBG.lootLive = DBG.lootLive + 1
+            else
+                CreditKill(guid, nil, "loot")
+                DBG.lootCredited = DBG.lootCredited + 1
+                k = recentKills[guid]
+            end
         end
         if k and not k.looted then
             k.looted = true
@@ -664,21 +690,32 @@ local DAMAGE = {
 
 local function OnCombatLog()
     local info = { Try(CombatLogGetCurrentEventInfo) }
+    DBG.cleu = DBG.cleu + 1
     local sub = Plain(info[2])
-    if not sub then return end
+    if not sub then DBG.secret = DBG.secret + 1; return end
     local srcGUID, srcFlags = Plain(info[4]), Plain(info[6])
     local dstGUID, dstFlags = Plain(info[8]), Plain(info[10])
-    if type(dstGUID) ~= "string" or not NpcId(dstGUID) then return end
-    if IsGroup(dstFlags) then return end  -- your own pet dying isn't a kill
+    if type(dstGUID) ~= "string" then
+        if sub == "PARTY_KILL" or sub == "UNIT_DIED" then DBG.noGuid = DBG.noGuid + 1 end
+        return
+    end
+    if not NpcId(dstGUID) then
+        if (sub == "PARTY_KILL" or sub == "UNIT_DIED") and not dstGUID:find("^Player") then
+            DBG.parseFail = DBG.parseFail + 1
+            NoteShape(dstGUID)
+        end
+        return
+    end
+    if IsGroup(dstFlags) then DBG.ownPet = DBG.ownPet + 1; return end  -- your own pet dying isn't a kill
     if sub == "PARTY_KILL" then
         -- it only fires for your group, but check the source anyway
-        if srcFlags ~= nil and not IsGroup(srcFlags) then return end
-        CreditKill(dstGUID, Plain(info[9]))
+        if srcFlags ~= nil and not IsGroup(srcFlags) then DBG.notGroup = DBG.notGroup + 1; return end
+        CreditKill(dstGUID, Plain(info[9]), "combatlog")
     elseif DAMAGE[sub] then
         if IsGroup(srcFlags) then tagged[dstGUID] = time() end
     elseif sub == "UNIT_DIED" then
         local t = tagged[dstGUID]
-        if t and time() - t <= TAG_WINDOW then CreditKill(dstGUID, Plain(info[9])) end
+        if t and time() - t <= TAG_WINDOW then CreditKill(dstGUID, Plain(info[9]), "tag") end
     end
 end
 
@@ -713,7 +750,7 @@ local function TargetDied()
     if Try(UnitGUID, "target") ~= watched then return end
     if not Plain(Try(UnitIsDead, "target")) then return end
     if Plain(Try(UnitIsTapDenied, "target")) then return end   -- someone else's kill
-    CreditKill(watched, Plain(Try(UnitName, "target")))
+    CreditKill(watched, Plain(Try(UnitName, "target")), "target")
 end
 
 local priceTimer = false
@@ -763,6 +800,16 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         ForgesLedgerKillLedgerDB.combatLog = (cmd == "combatlog on")
         print(PREFIX .. "Combat-log counting " .. (cmd == "combatlog on" and "ON" or "OFF") .. " after /reload."
             .. (cmd == "combatlog on" and " If the game shows a blocked-action dialog, turn it off again." or ""))
+    elseif cmd == "debug" then
+        print(PREFIX .. "mode: " .. tostring(ForgesLedgerKillLedgerDB.countMode)
+            .. " | combat-log events seen: " .. DBG.cleu .. " (secret/unreadable: " .. DBG.secret .. ")")
+        print("  kills counted via: combat log " .. DBG.via.combatlog .. ", damage tag " .. DBG.via.tag
+            .. ", target death " .. DBG.via.target .. ", loot window " .. DBG.via.loot)
+        print("  dropped: no guid " .. DBG.noGuid .. ", guid not parsed " .. DBG.parseFail
+            .. ", own pet " .. DBG.ownPet .. ", source not your group " .. DBG.notGroup)
+        print("  loot windows: " .. DBG.loots .. " (corpses first counted there: " .. DBG.lootCredited
+            .. ", living target skipped: " .. DBG.lootLive .. ")")
+        if #DBG.shapes > 0 then print("  guid shapes not parsed: " .. table.concat(DBG.shapes, "  ")) end
     elseif cmd == "reset session" then
         CharData().data.session = { startedAt = time(), mobs = {} }
         print(PREFIX .. "Session cleared.")
@@ -772,6 +819,7 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         print("  /kl - open or close the panel")
         print("  /kl session, /kl lifetime - open on that view")
         print("  /kl reset session - clear this session's numbers")
+        print("  /kl debug - what the counters saw (for bug reports)")
         print("  /kl combatlog on|off - count kills from the combat log instead (needs /reload; off by default)")
         print("  (resetting one mob or everything is in the panel)")
     end
