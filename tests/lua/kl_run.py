@@ -26,8 +26,24 @@ function InCombatLockdown() return false end
 function GetRealmName() return "Area 52" end
 function GetRealZoneText() return "Elwynn Forest" end
 function UnitFullName(u) return "Testchar", nil end
-function UnitName(u) if u == "target" then return TARGETNAME end return "Testchar" end
-function UnitGUID(u) if u == "target" then return TARGETGUID end return "Player-1-0001" end
+-- the target (the default kill counter watches it die)
+TGT = nil
+function UnitExists(u) if u == "target" then return TGT ~= nil end return true end
+function UnitIsPlayer(u) return u == "target" and TGT ~= nil and TGT.player == true end
+function UnitIsDead(u) return TGT ~= nil and TGT.dead == true end
+function UnitIsTapDenied(u) return TGT ~= nil and TGT.tap == true end
+function UnitName(u) if u == "target" then return TGT and TGT.name end return "Testchar" end
+function UnitGUID(u) if u == "target" then return TGT and TGT.guid end return "Player-1-0001" end
+function SETTARGET(guid, name, extra)
+  TGT = { guid = guid, name = name }
+  for k, v in pairs(extra or {}) do TGT[k] = v end
+  FireEvent("PLAYER_TARGET_CHANGED")
+end
+function HEALTH(unit) FireEvent("UNIT_HEALTH", unit or "target") end
+function CLEU_REGISTERED()
+  for f in pairs(EVENT_FRAMES) do if f._events.COMBAT_LOG_EVENT_UNFILTERED then return true end end
+  return false
+end
 function UnitClass() return "Warrior", "WARRIOR" end
 ITEM_QUALITY_COLORS = { [0] = { r = .6, g = .6, b = .6 }, [1] = { r = 1, g = 1, b = 1 }, [2] = { r = .1, g = 1, b = 0 }, [3] = { r = 0, g = .44, b = .87 } }
 -- the combat log
@@ -67,14 +83,15 @@ function MONEYSLOT(guid) return { type = 2, sources = { guid, 5 } } end
 '''
 
 
-def run(title, saved="", before="", login=True):
+def run(title, saved="", before="", login=True, cl=True):
     print("\n== " + title)
     R = lua51.LuaRuntime(unpack_returned_tuples=True)
     R.execute(MOCK)
     R.execute(WORLD)
     R.execute(before)
     code = open(os.path.join(ADDON, "ForgesLedger_KillLedger", "ForgesLedger_KillLedger.lua"), encoding="utf-8").read()
-    R.execute(saved)
+    # most suites exercise the opt-in combat-log counter; cl=False is the default
+    R.execute(("ForgesLedgerKillLedgerDB = { combatLog = true }\n" if cl else "") + saved)
     R.eval("function(c) assert(loadstring(c, '@KillLedger.lua'))('ForgesLedger_KillLedger', {}) end")(code)
     if login:
         R.execute('FireEvent("PLAYER_LOGIN"); FireEvent("PLAYER_ENTERING_WORLD", true, false); RunTimers()')
@@ -111,7 +128,7 @@ check("the save file has the shared envelope",
       R.eval("ForgesLedgerKillLedgerDB.schemaVersion") == 1
       and R.eval("ForgesLedgerKillLedgerDB.version") == "Retail"
       and R.eval("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].exportedAt") is not None)
-check("the combat log is used when the game gives it", R.eval("ForgesLedgerKillLedgerDB.countMode") == "combatlog")
+check("with the combat log opted in it is used", R.eval("ForgesLedgerKillLedgerDB.countMode") == "combatlog" and R.eval("CLEU_REGISTERED()"))
 ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('')")
 check("/kl opens the panel", shown(R, "ForgesLedgerKillLedgerPanel"))
 check("empty: it says how to start", "Nothing killed yet" in R.eval("ForgesLedgerKillLedgerPanel.empty:GetText()"))
@@ -238,7 +255,7 @@ ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('reset session')")
 check("no errors", not errors(R))
 
 R = run("Kill Ledger: old save files",
-        saved="""ForgesLedgerKillLedgerDB = { schemaVersion = 1, version = "Retail", characters = {
+        saved="""ForgesLedgerKillLedgerDB = { combatLog = true, schemaVersion = 1, version = "Retail", characters = {
           ["Testchar-Area52"] = { exportedAt = 5, data = { mobs = { ["1"] = { name = "Boar", kills = 40, items = {} } } } } } }""")
 check("lifetime numbers from before are kept", mob(R, 1).kills == 40)
 check("a missing session table is created", R.eval("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].data.session ~= nil"))
@@ -253,13 +270,47 @@ R = run("Kill Ledger: no combat log",
           f.RegisterEvent = function(self, e) if e == "COMBAT_LOG_EVENT_UNFILTERED" then error("blocked") end return re(self, e) end
           return f
         end""")
-check("it notices and switches to counting at the loot window", R.eval("ForgesLedgerKillLedgerDB.countMode") == "loot")
+check("blocked registration falls back to the default counter", R.eval("ForgesLedgerKillLedgerDB.countMode") == "observed")
 ev(R, "LOOT({ ITEMSLOT(100, G(1, 1), 2) })")
 check("a looted corpse is a kill", mob(R, 1).kills == 1 and mob(R, 1)["items"]["100"].dropEvents == 1)
 ev(R, "LOOT({ ITEMSLOT(100, G(1, 1), 2) })")
 check("...once", mob(R, 1).kills == 1)
 ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('')")
-check("the panel says how kills are counted", "when you loot" in R.eval(P + ".foot:GetText()"))
+check("the panel says how kills are counted", "your target dies" in R.eval(P + ".foot:GetText()"))
+
+R = run("Kill Ledger: default counting (KL-1: never touches the combat log)", cl=False)
+check("the combat log is NOT registered by default", not R.eval("CLEU_REGISTERED()"))
+check("the default mode is the observed counter", R.eval("ForgesLedgerKillLedgerDB.countMode") == "observed")
+kill(R, 1, 1)
+check("combat-log events are ignored in the default mode", mob(R, 1) is None)
+ev(R, 'SETTARGET(G(1, 1), "Boar")')
+ev(R, "HEALTH()")
+check("a living target is not a kill", mob(R, 1) is None)
+ev(R, "TGT.dead = true; HEALTH()")
+check("a target that dies is a kill", mob(R, 1) is not None and mob(R, 1).kills == 1 and mob(R, 1).name == "Boar")
+ev(R, "HEALTH(); HEALTH()")
+check("more health updates don't count it again", mob(R, 1).kills == 1)
+ev(R, 'SETTARGET(G(2, 1), "Wolf", { dead = true, tap = true })')
+ev(R, "HEALTH()")
+check("a kill someone else tapped is not yours", mob(R, 2) is None)
+ev(R, 'SETTARGET("Player-1-0007", "Bob", { dead = true, player = true })')
+ev(R, "HEALTH()")
+check("a dead player is not a mob kill", R.eval("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].data.mobs['0007']") is None)
+ev(R, 'SETTARGET(G(3, 1), "Bear", { dead = true })')
+ev(R, 'HEALTH("party1")')
+check("health changes of other units are ignored", mob(R, 3) is None)
+ev(R, "HEALTH()")
+check("...but the target's own count", mob(R, 3) is not None)
+ev(R, "LOOT({ ITEMSLOT(100, G(1, 1), 2) })")
+check("loot on a corpse counted at death attributes without a second kill", mob(R, 1).kills == 1 and mob(R, 1)["items"]["100"].dropEvents == 1)
+ev(R, "LOOT({ ITEMSLOT(101, G(4, 1)) })")
+check("a corpse first seen at the loot window is a kill", mob(R, 4).kills == 1 and mob(R, 4)["items"]["101"].dropEvents == 1)
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('')")
+check("the panel says how kills are counted", "your target dies" in R.eval(P + ".foot:GetText()") and not errors(R))
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('combatlog on')")
+check("/kl combatlog on is remembered for the next /reload", R.eval("ForgesLedgerKillLedgerDB.combatLog") == True and not R.eval("CLEU_REGISTERED()"))
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('combatlog off')")
+check("/kl combatlog off turns it back off", R.eval("ForgesLedgerKillLedgerDB.combatLog") == False)
 
 R = run("Kill Ledger: WoW Forever", before="WOW_PROJECT_ID, WOW_PROJECT_MAINLINE = 2, 1")
 check("it works on Forever and says so in the save file", R.eval("ForgesLedgerKillLedgerDB.version") == "Forever")

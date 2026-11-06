@@ -21,8 +21,14 @@
 --         from you, your pet, or a party/raid member (or their pets), or
 --     (b) the combat log reports its death (UNIT_DIED) and you, your pet or
 --         your group damaged it in the 20 seconds before it died.
---   If the game does not give addons the combat log, kills are counted when
---   you first loot the corpse instead (the panel says so).
+--   That is OPT-IN ("/kl combatlog on", then /reload). By default the addon
+--   never touches the combat log: modern clients treat it as a protected
+--   surface and show a "blocked from an action only available to the
+--   Blizzard UI" dialog naming the addon (bug KL-1). Instead, by default a
+--   kill counts once per corpse when
+--     (c) your target dies and it was tapped by you or your group
+--         (not tap-denied), or
+--     (d) you open the loot window of a corpse not counted yet.
 --
 -- HOW LOOT IS ATTRIBUTED
 --   When your loot window opens, every item slot is matched to its corpse by
@@ -226,7 +232,7 @@ local function ReadLoot()
     for guid in pairs(touched) do
         local k = recentKills[guid]
         -- no combat log: a corpse's first loot window is the kill
-        if not k and ForgesLedgerKillLedgerDB.countMode == "loot" then
+        if not k and ForgesLedgerKillLedgerDB.countMode ~= "combatlog" then
             CreditKill(guid, nil)
             k = recentKills[guid]
         end
@@ -473,9 +479,9 @@ function Render()
     end
     panel.resetAll:SetLabel(confirmAll and "Click again to confirm" or "Reset all")
     panel.resetAll:SetWidth(confirmAll and 150 or 90)
-    panel.foot:SetText(ForgesLedgerKillLedgerDB.countMode == "loot"
-        and "Kills are counted when you loot a corpse (the game isn't sharing the combat log)."
-        or "Your own loot only. Drop % = drops / kills; small samples are rough.")
+    panel.foot:SetText(ForgesLedgerKillLedgerDB.countMode == "combatlog"
+        and "Counting kills from the combat log. Your own loot only; drop % = drops / kills."
+        or "Counting kills when your target dies or you loot a corpse. Your own loot only; drop % = drops / kills.")
 end
 
 local function CreatePanel()
@@ -681,13 +687,43 @@ frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("LOOT_OPENED")
 frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
-local cleuOK = pcall(frame.RegisterEvent, frame, "COMBAT_LOG_EVENT_UNFILTERED")
-ForgesLedgerKillLedgerDB.countMode = cleuOK and "combatlog" or "loot"
+-- The combat log is opt-in (see the header): registering for it is what
+-- trips the blocked-action dialog on clients that restrict it.
+local cleuOK = false
+if ForgesLedgerKillLedgerDB.combatLog == true then
+    cleuOK = pcall(frame.RegisterEvent, frame, "COMBAT_LOG_EVENT_UNFILTERED")
+end
+ForgesLedgerKillLedgerDB.countMode = cleuOK and "combatlog" or "observed"
+frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+frame:RegisterEvent("UNIT_HEALTH")
+
+-- Target watching: remember a hostile creature you target; when it is dead
+-- and wasn't tap-denied (tagged by you or your group), that is a kill.
+local watched
+local function Watch()
+    watched = nil
+    if not Plain(Try(UnitExists, "target")) then return end
+    if Plain(Try(UnitIsPlayer, "target")) then return end
+    local guid = Plain(Try(UnitGUID, "target"))
+    if NpcId(guid) then watched = guid end
+end
+
+local function TargetDied()
+    if not watched or recentKills[watched] then return end
+    if Try(UnitGUID, "target") ~= watched then return end
+    if not Plain(Try(UnitIsDead, "target")) then return end
+    if Plain(Try(UnitIsTapDenied, "target")) then return end   -- someone else's kill
+    CreditKill(watched, Plain(Try(UnitName, "target")))
+end
 
 local priceTimer = false
 frame:SetScript("OnEvent", function(_, event, a, b)
     if event == "COMBAT_LOG_EVENT_UNFILTERED" then
         pcall(OnCombatLog)
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        pcall(Watch)
+    elseif event == "UNIT_HEALTH" then
+        if a == "target" then pcall(TargetDied) end
     elseif event == "LOOT_OPENED" then
         pcall(ReadLoot)
         Prune()
@@ -723,6 +759,10 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
     elseif cmd == "session" or cmd == "lifetime" then
         scope, page, selected = cmd, 1, nil
         ShowPanel()
+    elseif cmd == "combatlog on" or cmd == "combatlog off" then
+        ForgesLedgerKillLedgerDB.combatLog = (cmd == "combatlog on")
+        print(PREFIX .. "Combat-log counting " .. (cmd == "combatlog on" and "ON" or "OFF") .. " after /reload."
+            .. (cmd == "combatlog on" and " If the game shows a blocked-action dialog, turn it off again." or ""))
     elseif cmd == "reset session" then
         CharData().data.session = { startedAt = time(), mobs = {} }
         print(PREFIX .. "Session cleared.")
@@ -732,6 +772,7 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         print("  /kl - open or close the panel")
         print("  /kl session, /kl lifetime - open on that view")
         print("  /kl reset session - clear this session's numbers")
+        print("  /kl combatlog on|off - count kills from the combat log instead (needs /reload; off by default)")
         print("  (resetting one mob or everything is in the panel)")
     end
 end
