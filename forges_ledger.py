@@ -117,6 +117,14 @@ SATELLITES = {
         "pitch": "an automatic adventure journal in game: your character's firsts and milestones, screenshots of the big moments, and a recap to share",
         "games": ["retail", "forever"],
     },
+    "killledger": {
+        "folder": "ForgesLedger_KillLedger",
+        "db": "ForgesLedgerKillLedgerDB",
+        "schema": 1,
+        "title": "Forge's Ledger: Kill Ledger",
+        "pitch": "how many of each mob you've killed, what they drop and how often, and what it all sells for - in a panel and on its own tab here",
+        "games": ["retail", "forever"],
+    },
     # PUG Lyfe (addon/PugLyfe) is unreleased: add its entry back here when it launches
 }
 
@@ -2408,6 +2416,7 @@ th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--te
 th .arr{color:var(--accent)}
 tbody tr:last-child td{border-bottom:none}
 tbody tr:hover>td{background:var(--hover)}
+tr.clk{cursor:pointer}tr.sel>td{background:var(--hover)}
 .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .cn{font-weight:600}.star{color:var(--gold);font-size:12px}
 td:first-child{white-space:nowrap}
@@ -2534,6 +2543,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <button class="tab" data-tab="reps">Reputations</button>
   <button class="tab" data-tab="weekly">Todo</button>
   <button class="tab" data-tab="dung">Dungeons</button>
+  <button class="tab" data-tab="kills">Kill Ledger</button>
   <button class="tab" data-tab="classes">Classes</button>
   <button class="tab" data-tab="coll">Collections</button>
 </nav>
@@ -2603,6 +2613,19 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div id="legacy"></div>
 </section>
 
+<section id="tab-kills" hidden>
+  <div class="controls">
+    <div class="seg" id="kscope"><button data-kscope="session">Latest session</button><button data-kscope="lifetime">Lifetime</button></div>
+    <select id="kchar"></select>
+    <span class="count" id="kcount"></span>
+  </div>
+  <div id="ksatcard"></div>
+  <div class="stats" id="kstats" style="margin-top:4px"></div>
+  <div class="card scroll"><table id="ktable"></table></div>
+  <div id="kdetail"></div>
+  <div class="hint">From the Forge&#39;s Ledger: Kill Ledger companion addon, as of each character&#39;s last login. Drop % is the kills that dropped an item divided by kills, shown with the raw counts so a small sample reads as one. Your own loot only; prices are what a vendor pays. Click a mob to see its drops.</div>
+</section>
+
 <section id="tab-profs" hidden>
   <div class="controls">
     <select id="profsel"></select>
@@ -2654,13 +2677,13 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",shopchar:"",concall:false,game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",kscope:"session",kchar:"",kmob:"",shopchar:"",concall:false,game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
 // handy for bookmarks (and how the README screenshots are taken).
 (function(){
-  const h=location.hash.slice(1),tabs=["roster","level","profs","reps","weekly","dung","classes","coll"];
+  const h=location.hash.slice(1),tabs=["roster","level","profs","reps","weekly","dung","kills","classes","coll"];
   const extra={planner:["profs",u=>u.prof="__planner"],achievements:["coll",u=>u.cview="ach"],todo:["weekly",u=>0]};
   if(tabs.includes(h))ui.tab=h;
   else if(extra[h]){ui.tab=extra[h][0];extra[h][1](ui)}
@@ -2778,12 +2801,12 @@ function stat(v,l,k){
 
 function render(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===ui.tab));
-  const avail=D&&D.game==="forever"?["roster","level","weekly","classes"]:["roster","level","profs","reps","weekly","dung","classes","coll"];
+  const avail=D&&D.game==="forever"?["roster","level","weekly","kills","classes"]:["roster","level","profs","reps","weekly","dung","kills","classes","coll"];
   if(!avail.includes(ui.tab))ui.tab="roster";
   document.querySelectorAll(".tab").forEach(b=>b.hidden=!avail.includes(b.dataset.tab));
-  ["roster","level","profs","reps","weekly","dung","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
+  ["roster","level","profs","reps","weekly","dung","kills","classes","coll"].forEach(t=>$("tab-"+t).hidden=t!==ui.tab);
   if(!D)return;
-  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="reps")renderReps();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="dung")renderDungeons();else if(ui.tab==="classes")renderClasses();else renderCollections();
+  if(ui.tab==="roster")renderRoster();else if(ui.tab==="level")renderLevel();else if(ui.tab==="weekly")renderWeekly();else if(ui.tab==="reps")renderReps();else if(ui.tab==="profs")renderProfs();else if(ui.tab==="dung")renderDungeons();else if(ui.tab==="kills")renderKills();else if(ui.tab==="classes")renderClasses();else renderCollections();
   saveUI();
 }
 
@@ -2945,6 +2968,92 @@ function renderDungeons(){
       "<td>"+(i.dungeons?'<b>'+i.timed+"</b> of "+i.dungeons+" timed"+(i.best?' · best <b>+'+i.best+"</b>":""):'<span class="faint">—</span>')+"</td>"+
       "<td>"+(i.raids.length?i.raids.map(x=>esc(x.raid)+': '+x.parts.map(p=>esc(p[0])+" "+p[1]).join(", ")).join("<br>"):'<span class="faint">none yet</span>')+"</td>"+
       '<td class="dim">'+(i.at?ago(i.at):"—")+"</td></tr>").join("")+"</tbody>";
+}
+
+/* ---------------- Kill Ledger (Forge's Ledger: Kill Ledger companion) ---------------- */
+// Per mob: kills, and per item the kills that dropped it (dropEvents), the
+// total quantity, and its vendor price. Drop % = dropEvents / kills, always
+// shown with the raw counts. Added up across characters (or one character).
+function coin(c){
+  c=Math.trunc(Math.abs(c||0));
+  const g=Math.floor(c/10000),s=Math.floor(c%10000/100),cp=c%100,p=[];
+  if(g)p.push('<span class="mg">'+g.toLocaleString()+"g</span>");
+  if(s)p.push('<span class="ms">'+s+"s</span>");
+  if(cp||!p.length)p.push('<span class="mc">'+cp+"c</span>");
+  return p.join(" ");
+}
+const QCOL={0:"#9d9d9d",2:"#1eff00",3:"#0070dd",4:"#a335ee",5:"#ff8000",6:"#e6cc80"};
+function killStore(c,scope){
+  const d=c.sat&&c.sat.killledger;if(!d||typeof d!=="object")return null;
+  const st=scope==="lifetime"?d.mobs:(d.session&&d.session.mobs);
+  return st&&typeof st==="object"?st:{};
+}
+function killAgg(chars,scope){
+  const mobs={};
+  chars.forEach(c=>{
+    const st=killStore(c,scope);if(!st)return;
+    Object.entries(st).forEach(([id,m])=>{
+      if(!m||typeof m!=="object")return;
+      const a=mobs[id]||(mobs[id]={id,name:"",zone:"",kills:0,last:0,items:{}});
+      a.kills+=+m.kills||0;
+      if(m.name)a.name=m.name;
+      if(m.zone)a.zone=m.zone;
+      a.last=Math.max(a.last,+m.lastKill||0);
+      Object.entries(m.items||{}).forEach(([iid,it])=>{
+        if(!it||typeof it!=="object")return;
+        const b=a.items[iid]||(a.items[iid]={id:iid,dropEvents:0,qty:0});
+        b.dropEvents+=+it.dropEvents||0;
+        b.qty+=+it.qty||0;
+        if(it.name)b.name=it.name;
+        if(it.quality!=null)b.quality=+it.quality;
+        if(typeof it.price==="number")b.price=it.price;
+        if(it.noSell)b.noSell=true;
+      });
+    });
+  });
+  const list=Object.values(mobs);
+  list.forEach(m=>{
+    m.value=0;
+    Object.values(m.items).forEach(i=>{if(typeof i.price==="number")m.value+=i.price*i.qty});
+  });
+  return list.sort((a,b)=>b.kills-a.kills||String(a.name||a.id).localeCompare(String(b.name||b.id)));
+}
+function dropPct(it,kills){
+  if(!(kills>0))return "—";
+  const p=100*it.dropEvents/kills;
+  return (p>=10?Math.round(p):p.toFixed(1))+"% <span class=\"dim\">("+it.dropEvents+"/"+kills+")</span>";
+}
+function renderKills(){
+  document.querySelectorAll("#kscope button").forEach(b=>b.classList.toggle("on",b.dataset.kscope===ui.kscope));
+  $("ksatcard").innerHTML=satelliteCard("killledger");
+  const owners=D.characters.filter(c=>c.sat&&c.sat.killledger);
+  if(ui.kchar&&!owners.some(c=>c.key===ui.kchar))ui.kchar="";
+  $("kchar").innerHTML='<option value="">All characters ('+owners.length+")</option>"+
+    owners.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ui.kchar?" selected":"")+">"+esc(c.name)+"</option>").join("");
+  const list=killAgg(ui.kchar?owners.filter(c=>c.key===ui.kchar):owners,ui.kscope);
+  $("kcount").textContent=list.length+" mob"+(list.length===1?"":"s");
+  if(!list.length){
+    $("kstats").innerHTML="";$("kdetail").innerHTML="";
+    $("ktable").innerHTML='<tbody><tr><td class="empty">'+(owners.length?(ui.kscope==="session"?"Nothing killed and looted yet in the latest session. Try Lifetime, or go kill something.":"No kills recorded yet."):"No Kill Ledger data yet - log into a character with the Kill Ledger addon enabled.")+"</td></tr></tbody>";
+    return;
+  }
+  if(!list.some(m=>m.id===ui.kmob))ui.kmob=list[0].id;
+  const kills=list.reduce((n,m)=>n+m.kills,0),value=list.reduce((n,m)=>n+m.value,0);
+  const top=list[0];
+  $("kstats").innerHTML=stat(kills.toLocaleString(),"kills")+stat(list.length.toLocaleString(),"different mobs")+
+    stat(coin(value),"vendor value of drops")+stat(esc(top.name||"Mob "+top.id),"most killed<br>"+top.kills.toLocaleString()+" kills");
+  $("ktable").innerHTML='<thead><tr><th>Mob</th><th>Zone</th><th class="num">Kills</th><th class="num">Items seen</th><th class="num">Vendor value</th><th class="num">Per kill</th><th>Last kill</th></tr></thead><tbody>'+
+    list.map(m=>'<tr class="clk'+(m.id===ui.kmob?" sel":"")+'" data-kmob="'+esc(m.id)+'"><td><b>'+esc(m.name||"Mob "+m.id)+"</b></td><td class=\"dim\">"+esc(m.zone||"")+
+      '</td><td class="num"><b>'+m.kills.toLocaleString()+'</b></td><td class="num">'+Object.keys(m.items).length+
+      '</td><td class="num">'+coin(m.value)+'</td><td class="num">'+(m.kills?coin(m.value/m.kills):"—")+
+      '</td><td class="dim">'+(m.last?ago(m.last):"—")+"</td></tr>").join("")+"</tbody>";
+  const m=list.find(x=>x.id===ui.kmob),items=Object.values(m.items).sort((a,b)=>b.dropEvents-a.dropEvents||String(a.name||a.id).localeCompare(String(b.name||b.id)));
+  $("kdetail").innerHTML='<div class="panel-h">'+esc(m.name||"Mob "+m.id)+' <span class="dim">· '+m.kills.toLocaleString()+" kill"+(m.kills===1?"":"s")+(m.zone?" · "+esc(m.zone):"")+'</span></div><div class="card scroll"><table><thead><tr><th>Item</th><th class="num">Drop %</th><th class="num">Avg qty</th><th class="num">Total looted</th><th class="num">Vendor price</th><th class="num">Total value</th></tr></thead><tbody>'+
+    (items.length?items.map(i=>'<tr><td><b'+(QCOL[i.quality]?' style="color:'+QCOL[i.quality]+'"':"")+">"+esc(i.name||"Item "+i.id)+"</b></td>"+
+      '<td class="num">'+dropPct(i,m.kills)+'</td><td class="num">'+(i.dropEvents?(i.qty/i.dropEvents).toFixed(1):"—")+
+      '</td><td class="num">'+i.qty.toLocaleString()+'</td><td class="num">'+(i.noSell?'<span class="faint">no sell</span>':typeof i.price==="number"?coin(i.price):'<span class="faint">?</span>')+
+      '</td><td class="num">'+(i.noSell?'<span class="faint">—</span>':typeof i.price==="number"?coin(i.price*i.qty):'<span class="faint">?</span>')+"</td></tr>").join(""):
+      '<tr><td class="empty" colspan="6">No drops seen for this mob yet.</td></tr>')+"</tbody></table></div>";
 }
 
 /* recent crafting, from the Professions companion's session counts */
@@ -3585,7 +3694,7 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dscope],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dscope],[data-kscope],[data-kmob],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
   if(!el)return;
   if(el.dataset.repview){ui.repview=el.dataset.repview;render()}
   else if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
@@ -3593,6 +3702,8 @@ document.addEventListener("click",async e=>{
   else if(el.dataset.dismissUpdate){e.preventDefault();try{localStorage.setItem("dismissedUpdate",el.dataset.dismissUpdate)}catch(err){}header()}
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
   else if(el.dataset.dscope){ui.dscope=el.dataset.dscope;render()}
+  else if(el.dataset.kscope){ui.kscope=el.dataset.kscope;render()}
+  else if(el.dataset.kmob){ui.kmob=el.dataset.kmob;render()}
   else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
   else if(el.dataset.goal){goalAction(el.dataset.goal)}
   else if(el.dataset.tab){ui.tab=el.dataset.tab;render()}
@@ -3618,7 +3729,7 @@ document.addEventListener("change",e=>{
   if(t.id==="concall"){ui.concall=t.checked;render();return}
   if(t.classList.contains("rolesel"))return setRole(t.dataset.key,t.value);
   if(t.classList.contains("wk"))return setWeekly(t.dataset.key,t.dataset.item,t.checked);
-  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec",repchar:"repchar",rephide:"rephide"};
+  const map={fcls:"cls",frole:"role",fstar:"star",flvl:"lvl",profsel:"prof",pstar:"pstar",crole:"crole",lvstar:"lvstar",lv10:"lv10",psec:"psec",repchar:"repchar",rephide:"rephide",kchar:"kchar"};
   if(map[t.id]){ui[map[t.id]]=t.type==="checkbox"?t.checked:t.value;render()}
 });
 $("q").addEventListener("input",e=>{ui.q=e.target.value;render()});
@@ -4534,6 +4645,16 @@ def build_forever_data():
             gold.update(g)
     except Exception as e:
         addon_error = "Couldn't read the Forever addon save file (%s)." % e
+    sats = {}  # satellites that support Forever, merged across installed clients
+    try:
+        for client in forever_clients():
+            for sid, e in load_satellites(client, "forever").items():
+                cur = sats.setdefault(sid, {"installed": False, "bundled": e["bundled"], "chars": {}})
+                cur["installed"] = cur["installed"] or e["installed"]
+                cur["chars"].update(e["chars"])
+    except Exception as e:
+        print("Satellite scan (Forever) failed: %s" % e, flush=True)
+        sats = {}
     chars = []
     for key, g in gold.items():
         aid = folder_ids.get(g.get("folder"))
@@ -4547,6 +4668,7 @@ def build_forever_data():
              "gold": g.get("money", 0), "gold_7d": gold_7d_change(g.get("history", [])),
              "last_login": g.get("last_seen", 0),
              "tracked": k in tracked_keys, "role": roles.get(k, ""), "has_addon": True}
+        c["sat"] = {sid: e["chars"][key]["data"] for sid, e in sats.items() if key in e["chars"]}
         c["todo"] = todo_auto(c, g.get("todo"))
         if g.get("rested") is not None and g.get("xp_max") and c["level"] < FOREVER_CAP:
             c["rested"] = {"pct": min(150, round(g["rested"] * 100.0 / g["xp_max"])),
@@ -4561,7 +4683,7 @@ def build_forever_data():
     return {
         "game": "forever", "cap": FOREVER_CAP, "classes": classes,
         "forever_available": True,
-        "satellites": {},  # none support Forever yet
+        "satellites": satellites_summary(sats),  # Kill Ledger supports Forever
         "synced_at": 0, "connected": is_connected(), "syncing": STATE["syncing"],
         "sync_error": None, "sv_path": find_sv_file(), "sv_mtime": STATE["sv_mtime"],
         "addon_error": addon_error, "characters": chars, "catalog_totals": {},
