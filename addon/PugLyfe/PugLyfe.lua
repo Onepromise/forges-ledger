@@ -1,8 +1,9 @@
--- PUG Lyfe v1.0 (retail and WoW Forever)
+-- PUG Lyfe v1.1 (retail and WoW Forever)
 -- Your private PUG journal. Group with someone, thumbs-up or thumbs-down
 -- them and leave yourself a note; next time they join your group, a small
--- reminder says what you thought. Personal only: nothing is shared, no
--- messages are sent, and nothing is read from chat.
+-- reminder says what you thought. Personal only: nothing is shared and no
+-- messages are sent. (v1.1 tags names in your own chat window with what you
+-- remember; it never stores or sends a chat message.)
 --
 -- How it works
 --   * Whenever you're in a group, each new member is remembered (name,
@@ -25,7 +26,7 @@
 --   * no work every frame: it reacts to group changes and nothing else
 
 local ADDON = "PugLyfe"
-local VERSION = "1.0"
+local VERSION = "1.1"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[PUG Lyfe]|r "
 local MEDIA = "Interface\\AddOns\\PugLyfe\\Media\\"
@@ -75,6 +76,10 @@ local function DB()
     def("tooltip", true)        -- a line on their tooltip
     def("skipKnown", true)      -- ignore guildmates and friends
     def("minimap", true)
+    def("joinChat", true)       -- v1.1: a chat line too when a known player joins
+    def("inviteLine", true)     -- v1.1: a chat line when a known player invites me
+    def("lfgMarks", true)       -- v1.1: a mark on Premade Groups rows (retail)
+    def("chatTags", true)       -- v1.1: tag known players' names in chat
     s.angle = tonumber(s.angle) or 215
     return db
 end
@@ -124,6 +129,7 @@ local function Record(m)
         Prune()  -- (after lastSeen is set: a brand-new record must not look oldest)
     end
     rec.class = m.class or rec.class
+    if type(m.guid) == "string" then rec.guid = m.guid end
     rec.prevSeen = tonumber(rec.lastSeen)  -- the reminder says "last seen" as of BEFORE today's group
     rec.lastSeen = now
     rec.times = (tonumber(rec.times) or 0) + 1
@@ -169,6 +175,65 @@ local function RatingText(r)
     return "No rating"
 end
 
+---------------------------------------------------- the recognition block ---
+-- v1.1: ONE line, the same everywhere you meet someone: your thumb, how many
+-- groups you've shared, your note. "Grouped" is rec.times (groups shared,
+-- counting the current one); unrated people you've grouped with count too.
+
+local THUMB = {
+    up = "|T" .. MEDIA .. "thumb_up.tga:12:12:0:-1|t",
+    down = "|T" .. MEDIA .. "thumb_down.tga:12:12:0:-1|t",
+}
+
+local function Rated(rec) return type(rec) == "table" and (rec.rating == "up" or rec.rating == "down") end
+
+-- worth showing: rated, noted, or grouped with before
+local function Recognized(rec)
+    return type(rec) == "table" and (Known(rec) or (tonumber(rec.times) or 0) > 0)
+end
+
+-- before: override the grouped count (the join reminder says "before today's group")
+local function Block(rec, before)
+    local n = before or tonumber(rec.times) or 0
+    local parts = {}
+    if Rated(rec) then
+        local col = rec.rating == "down" and "|cffe06a45" or "|cff73b84d"
+        tinsert(parts, THUMB[rec.rating] .. " " .. col .. (rec.rating == "up" and "thumbs up" or "thumbs down") .. "|r")
+    end
+    if n > 0 then tinsert(parts, "grouped " .. n .. "x") end
+    if not Rated(rec) then tinsert(parts, "not rated yet") end
+    if type(rec.note) == "string" and rec.note ~= "" then tinsert(parts, "\"" .. rec.note .. "\"") end
+    return table.concat(parts, " \194\183 ")
+end
+
+-- "Name" or "Name-Realm" (as chat, invites and the group finder give them)
+local function FindRec(fullName)
+    fullName = Plain(fullName)
+    if type(fullName) ~= "string" or fullName == "" then return nil end
+    local name, realm = fullName:match("^([^%-]+)%-(.+)$")
+    if not name then name = fullName end
+    local key = name .. "-" .. RealmKey(realm)
+    return DB().players[key], key
+end
+
+-- guildmate / friend by GUID or by name, for places that have no unit
+local function IsKnownGuid(guid)
+    guid = Plain(guid)
+    if type(guid) ~= "string" or guid == "" then return false end
+    if C_FriendList and C_FriendList.IsFriend and Try(C_FriendList.IsFriend, guid) then return true end
+    if C_BattleNet and C_BattleNet.GetAccountInfoByGUID and Try(C_BattleNet.GetAccountInfoByGUID, guid) then return true end
+    if IsGuildMember and Try(IsGuildMember, guid) then return true end
+    return false
+end
+
+local function IsKnownName(name)
+    name = Plain(name)
+    if type(name) ~= "string" or name == "" then return false end
+    if C_GuildInfo and C_GuildInfo.MemberExistsByName and Try(C_GuildInfo.MemberExistsByName, name) then return true end
+    if C_FriendList and C_FriendList.GetFriendInfo and Try(C_FriendList.GetFriendInfo, name) then return true end
+    return false
+end
+
 --------------------------------------------------------------- the group ---
 
 local function InGroup() return Try(IsInGroup) and true or false end
@@ -204,7 +269,7 @@ local function Members()
                 pending = true
             elseif not (skip and IsKnownPerson(unit)) then
                 local _, class = Try(UnitClass, unit)
-                tinsert(out, { key = name .. "-" .. RealmKey(realm), name = name, class = Plain(class),
+                tinsert(out, { key = name .. "-" .. RealmKey(realm), name = name, class = Plain(class), guid = Plain(Try(UnitGUID, unit)),
                                realm = (type(Plain(realm)) == "string" and Plain(realm) ~= "") and Plain(realm) or MyRealm() })
             end
         end
@@ -294,6 +359,12 @@ local function Scan()
         end
     end
     if Settings().popup then Enqueue("popup", known) end
+    if Settings().joinChat then
+        for _, k in ipairs(known) do
+            -- "grouped before" excludes the group they just joined
+            print(PREFIX .. Label(k.rec) .. " joined: " .. Block(k.rec, math.max(0, (tonumber(k.rec.times) or 1) - 1)))
+        end
+    end
     if pending and retries < 5 then
         retries = retries + 1
         C_Timer.After(2, ScanGroup)
@@ -741,6 +812,10 @@ local SETTING_ROWS = {
     { "targetPopup", "Remind me when I target them" },
     { "tooltip", "Add a line to their tooltip" },
     { "skipKnown", "Skip guildmates and friends" },
+    { "joinChat", "Also say it in chat when a player I know joins" },
+    { "inviteLine", "Show what I think of someone who invites me" },
+    { "lfgMarks", "Mark players in the Premade Groups list (retail)" },
+    { "chatTags", "Tag players I know in chat" },
     { "minimap", "Show the minimap button" },
 }
 
@@ -959,7 +1034,7 @@ local function CreateWindow()
         local row = CreateFrame("Button", nil, sp)
         row:SetPoint("TOPLEFT", sp, "TOPLEFT", 4, y)
         row:SetPoint("TOPRIGHT", sp, "TOPRIGHT", -4, y)
-        row:SetHeight(32)
+        row:SetHeight(30)
         Tex(row, "HIGHLIGHT", { 1, 1, 1, 0.05 }):SetAllPoints()
         local st = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         st:SetPoint("RIGHT", row, "RIGHT", -6, 0)
@@ -978,7 +1053,7 @@ local function CreateWindow()
             RenderSettings()
         end)
         tinsert(sp.toggles, { key = t[1], state = st, label = l })
-        y = y - 36
+        y = y - 32
     end
     local ex = Btn(sp, "Export my notes", 130)
     ex:SetPoint("TOPLEFT", 4, y - 12)
@@ -988,7 +1063,7 @@ local function CreateWindow()
     foot:SetPoint("RIGHT", -4, 0)
     foot:SetJustifyH("LEFT")
     foot:SetTextColor(DIM[1], DIM[2], DIM[3])
-    foot:SetText("Everything stays on your PC: nothing is sent, and chat is never read.\nPUG Lyfe v" .. VERSION .. "  \194\183  by Forge at Crescent Cove")
+    foot:SetText("Everything stays on your PC: nothing is sent. Chat tags only mark names on your own screen.\nPUG Lyfe v" .. VERSION .. "  \194\183  by Forge at Crescent Cove")
     sp:Hide()
 
     -- export: your notes as text, selected for copying
@@ -1092,9 +1167,9 @@ local function TooltipLine(tooltip)
     name = Plain(name)
     if type(name) ~= "string" or name == "" then return end
     local rec = DB().players[name .. "-" .. RealmKey(realm)]
-    if not Known(rec) then return end
-    local col = rec.rating == "down" and "|cffe06a45" or rec.rating == "up" and "|cff73b84d" or "|cff999999"
-    tooltip:AddLine("PUG Lyfe: " .. col .. RatingText(rec.rating) .. "|r" .. (rec.note and ("  -  " .. rec.note) or ""))
+    if not Recognized(rec) then return end
+    if Settings().skipKnown and IsKnownPerson(unit) then return end
+    tooltip:AddLine("PUG Lyfe: " .. Block(rec))
 end
 
 local function HookTooltips()
@@ -1105,20 +1180,117 @@ local function HookTooltips()
     end
 end
 
+---------------------------------------------------- recognition everywhere ---
+-- v1.1. Surfacing only: nothing here accepts, declines, blocks or sends.
+
+-- About to join: someone invites you. A chat line, never a change to the
+-- invite popup (the accept/decline flow is Blizzard's, and we keep our hands off).
+local function OnInvite(name, guid)
+    local s = Settings()
+    if not s.inviteLine then return end
+    local rec = FindRec(name)
+    if not Recognized(rec) then return end
+    if s.skipKnown and (IsKnownGuid(guid) or IsKnownName(name)) then return end
+    print(PREFIX .. "Invite from " .. tostring(Plain(name)) .. ": " .. Block(rec))
+end
+
+-- Chat: a small mark in front of what a known player says, in YOUR chat
+-- window only (an event filter; the message itself is not stored or sent).
+local CHAT_EVENTS = { "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER", "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER",
+                      "CHAT_MSG_INSTANCE_CHAT", "CHAT_MSG_INSTANCE_CHAT_LEADER", "CHAT_MSG_WHISPER",
+                      "CHAT_MSG_SAY", "CHAT_MSG_YELL" }
+
+local function ChatTagFor(msg, author, ...)
+    local s = Settings()
+    if not s.chatTags then return nil end
+    msg, author = Plain(msg), Plain(author)
+    if type(msg) ~= "string" or type(author) ~= "string" then return nil end
+    local who = author:match("^([^%-]+)") or author
+    if who == Plain(Try(UnitName, "player")) then return nil end
+    local rec = FindRec(author)
+    if not Recognized(rec) then return nil end
+    local guid = select(10, ...)
+    if s.skipKnown and (IsKnownGuid(guid) or IsKnownName(author)) then return nil end
+    if Rated(rec) then return THUMB[rec.rating] .. " " .. msg end
+    return "|cff999999[grouped " .. (tonumber(rec.times) or 0) .. "x]|r " .. msg
+end
+
+local function ChatFilter(_, _, msg, author, ...)
+    local ok, tagged = pcall(ChatTagFor, msg, author, ...)
+    if ok and tagged then return false, tagged, author, ... end
+    return false
+end
+
+local function HookChat()
+    if type(ChatFrame_AddMessageEventFilter) ~= "function" then return end
+    for _, e in ipairs(CHAT_EVENTS) do pcall(ChatFrame_AddMessageEventFilter, e, ChatFilter) end
+end
+
+-- Retail Premade Groups: a small mark on rows whose leader / applicant you
+-- know. Post-hooks only (hooksecurefunc), so Blizzard's own code is never replaced.
+local function MarkRow(row, name)
+    if not row or type(row.CreateFontString) ~= "function" then return end
+    local rec = Settings().lfgMarks and FindRec(name) or nil
+    local show = Recognized(rec) and not (Settings().skipKnown and IsKnownName(name))
+    local fs = rawget(row, "PugLyfeMark")
+    if not fs then
+        if not show then return end
+        fs = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -8, 4)
+        row.PugLyfeMark = fs
+    end
+    if show then
+        fs:SetText(Rated(rec) and (THUMB[rec.rating] .. " grouped " .. (tonumber(rec.times) or 0) .. "x")
+            or ("|cff999999grouped " .. (tonumber(rec.times) or 0) .. "x|r"))
+        fs:Show()
+    else
+        fs:Hide()
+    end
+end
+
+local lfgHooked = {}
+local function HookLfg()
+    if not IS_RETAIL or type(hooksecurefunc) ~= "function" then return end
+    if not lfgHooked.search and type(_G.LFGListSearchEntry_Update) == "function" then
+        lfgHooked.search = true
+        pcall(hooksecurefunc, "LFGListSearchEntry_Update", function(entry)
+            pcall(function()
+                local id = entry and entry.resultID
+                local info = id and C_LFGList and Try(C_LFGList.GetSearchResultInfo, id)
+                MarkRow(entry, info and info.leaderName)
+            end)
+        end)
+    end
+    if not lfgHooked.applicant and type(_G.LFGListApplicationViewer_UpdateApplicantMember) == "function" then
+        lfgHooked.applicant = true
+        pcall(hooksecurefunc, "LFGListApplicationViewer_UpdateApplicantMember", function(member, appID, memberIdx)
+            pcall(function()
+                MarkRow(member, C_LFGList and (Try(C_LFGList.GetApplicantMemberInfo, appID, memberIdx)))
+            end)
+        end)
+    end
+end
+
 ----------------------------------------------------------------- events ---
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("PLAYER_LOGIN")
 for _, e in ipairs({ "GROUP_ROSTER_UPDATE", "LFG_COMPLETION_REWARD", "PLAYER_TARGET_CHANGED",
-                     "PLAYER_REGEN_ENABLED", "PLAYER_ENTERING_WORLD" }) do
+                     "PLAYER_REGEN_ENABLED", "PLAYER_ENTERING_WORLD", "PARTY_INVITE_REQUEST", "ADDON_LOADED" }) do
     pcall(frame.RegisterEvent, frame, e)  -- in case a client lacks one
 end
-frame:SetScript("OnEvent", function(_, event)
+frame:SetScript("OnEvent", function(_, event, a, b, c, d, e, f, g)
     if event == "PLAYER_LOGIN" then
         DB()
         UpdateMinimap()
         HookTooltips()
+        HookChat()
+        HookLfg()
         QueueScan()
+    elseif event == "ADDON_LOADED" then
+        if a == "Blizzard_GroupFinder" or a == "Blizzard_LookingForGroupUI" then HookLfg() end
+    elseif event == "PARTY_INVITE_REQUEST" then
+        pcall(OnInvite, a, g)
     elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
         QueueScan()
     elseif event == "LFG_COMPLETION_REWARD" then

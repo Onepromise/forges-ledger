@@ -274,7 +274,7 @@ L = run("PUG Lyfe: tooltips")
 roster(L, '{ P("Alpha", "MAGE") }')
 ev(L, "PugLyfeDB.players['Alpha-Area52'].rating = 'down'; PugLyfeDB.players['Alpha-Area52'].note = 'left mid-boss'; MOUSE = P('Alpha', 'MAGE')")
 ev(L, "POSTCALLS[2](TOOLTIP)")
-check("a known player's tooltip gets a PUG Lyfe line", len(list(L.eval("TLINES").values())) == 1 and "Avoid" in L.eval("TLINES[1]") and "left mid-boss" in L.eval("TLINES[1]"), L.eval("TLINES"))
+check("a known player's tooltip gets a PUG Lyfe line", len(list(L.eval("TLINES").values())) == 1 and "thumbs down" in L.eval("TLINES[1]") and "left mid-boss" in L.eval("TLINES[1]"), L.eval("TLINES"))
 ev(L, "TLINES = {}; MOUSE = P('Stranger', 'MAGE'); POSTCALLS[2](TOOLTIP)")
 check("a stranger's doesn't", len(list(L.eval("TLINES").values())) == 0)
 ev(L, "PugLyfeDB.settings.tooltip = false; MOUSE = P('Alpha', 'MAGE'); POSTCALLS[2](TOOLTIP)")
@@ -335,7 +335,7 @@ check("Settings opens in place of the detail", L.eval("PugLyfeWindow.settings:Is
 ev(L, "local t = PugLyfeWindow.settings.toggles[1]; assert(t.key == 'askAfter')")
 ev(L, "PugLyfeWindow.settings.toggles[1].state._parent._scripts.OnClick(PugLyfeWindow.settings.toggles[1].state._parent)")
 check("a settings row flips its setting", L.eval("PugLyfeDB.settings.askAfter") is False and L.eval("PugLyfeWindow.settings.toggles[1].state:GetText()") == "Off")
-ev(L, "PugLyfeWindow.settings.toggles[6].state._parent._scripts.OnClick(PugLyfeWindow.settings.toggles[6].state._parent)")
+ev(L, "PugLyfeWindow.settings.toggles[10].state._parent._scripts.OnClick(PugLyfeWindow.settings.toggles[10].state._parent)")
 check("the minimap toggle shows/hides the button", not L.eval("PugLyfeMinimapButton:IsShown()"))
 ev(L, "SlashCmdList.PUGLYFE('export')")
 text = L.eval("PugLyfeWindow.export.text:GetText()")
@@ -399,7 +399,7 @@ L = run("PUG Lyfe: settings layout")
 ev(L, "SlashCmdList.PUGLYFE('')")
 ev(L, "PugLyfeWindow.gear._scripts.OnClick(PugLyfeWindow.gear)")
 ok = True
-for i in range(1, 7):
+for i in range(1, 11):
     ok = ok and L.eval("""(function()
         local t = PugLyfeWindow.settings.toggles[%d]
         local row, sp = t.state._parent, PugLyfeWindow.settings
@@ -408,6 +408,171 @@ for i in range(1, 7):
         return rp.TOPRIGHT == sp and rp.TOPLEFT == sp
     end)()""" % i)
 check("every settings row is pinned to both edges of the panel", ok)
+
+# ============================================================ v1.1 recognition ===
+V11_WORLD = r"""
+CHATFILTERS = {}
+function ChatFrame_AddMessageEventFilter(ev, fn) CHATFILTERS[ev] = fn end
+C_FriendList.GetFriendInfo = function(name) if name == "Pal" or name == "Pal-Area52" then return { name = name } end end
+function Ambiguate(n) return n end
+"""
+
+
+def chat(L, event, author, msg="hello", guid="Player-1-0099"):
+    """Run the registered chat filter; returns (hidden, message)."""
+    L.execute("CF_R = { CHATFILTERS[%r](nil, %r, %r, %r, 'lang', '', '', '', 0, 0, '', 0, 1, %r) }" % (event, event, msg, author, guid))
+    hidden = L.eval("CF_R[1]")
+    return hidden, L.eval("CF_R[2]")
+
+
+def said(L):
+    return " ".join(L.eval("PRINTED").values())
+
+
+# ---------------------------------------------- v1.0 surfaces, verified first
+L = run("PUG Lyfe v1.1: the two v1.0 surfaces fire as specced (Task 1)")
+roster(L, '{ P("Alpha", "MAGE") }')
+ev(L, "PugLyfeDB.players['Alpha-Area52'].rating = 'down'; PugLyfeDB.players['Alpha-Area52'].note = 'left mid-boss'")
+roster(L, "{}")
+ev(L, "HIDE(); AdvanceTime(86400)")
+roster(L, '{ P("Alpha", "MAGE") }')
+check("v1.0 on-join reminder fires for a rated player", shown(L, "PugLyfePopup") and popup_rows(L)[0][0] == "Alpha")
+ev(L, "TLINES = {}; MOUSE = P('Alpha', 'MAGE'); POSTCALLS[2](TOOLTIP)")
+check("v1.0 tooltip line fires for a rated player", len(list(L.eval("TLINES").values())) == 1 and "left mid-boss" in L.eval("TLINES[1]"))
+
+# ------------------------------------------------------------ surface 1: join
+L = run("PUG Lyfe v1.1: joining a group (every member, mid-run joins)", before=V11_WORLD)
+roster(L, '{ P("Alpha", "MAGE"), P("Beta", "ROGUE") }')
+ev(L, "PugLyfeDB.players['Alpha-Area52'].rating = 'down'; PugLyfeDB.players['Alpha-Area52'].note = 'left mid-boss'")
+ev(L, "PugLyfeDB.players['Beta-Area52'].rating = 'up'")
+roster(L, "{}")
+ev(L, "HIDE(); PRINTED = {}; AdvanceTime(86400)")
+roster(L, '{ P("Alpha", "MAGE"), P("Beta", "ROGUE"), P("Stranger", "PRIEST") }')
+out = said(L)
+check("every rated member gets a chat line with the block", "Alpha joined" in out and "thumbs down" in out and "grouped 1x" in out and "left mid-boss" in out, out)
+check("...for the second rated member too", "Beta joined" in out and "thumbs up" in out, out)
+check("a stranger gets none", "Stranger" not in out)
+ev(L, "PRINTED = {}")
+roster(L, '{ P("Alpha", "MAGE"), P("Beta", "ROGUE"), P("Stranger", "PRIEST"), P("Late", "MAGE") }')
+ev(L, "PugLyfeDB.players['Late-Area52'] = { name = 'Late', realm = 'Area52', rating = 'up', times = 2, lastSeen = time() - 86400, contexts = {} }")
+ev(L, "PRINTED = {}; GROUP.members = { P('Alpha', 'MAGE'), P('Beta', 'ROGUE'), P('Stranger', 'PRIEST'), P('Late', 'MAGE'), P('Mid', 'ROGUE') }")
+ev(L, "PugLyfeDB.players['Mid-Area52'] = { name = 'Mid', realm = 'Area52', rating = 'down', times = 1, lastSeen = time() - 86400, contexts = {} }")
+ev(L, 'FireEvent("GROUP_ROSTER_UPDATE")')
+out = said(L)
+check("someone who joins mid-run is checked too", "Mid" in out and "joined" in out and "Alpha" not in out, out)
+ev(L, "PugLyfeDB.settings.joinChat = false; PRINTED = {}; GROUP.members = {}; FireEvent('GROUP_ROSTER_UPDATE')")
+ev(L, "AdvanceTime(86400); PugLyfeDB.settings.joinChat = false; PRINTED = {}; GROUP.members = { P('Alpha', 'MAGE') }; FireEvent('GROUP_ROSTER_UPDATE')")
+check("the chat line can be switched off", "joined" not in said(L))
+
+# ------------------------------------------------- surface 2: about to join
+L = run("PUG Lyfe v1.1: group invites", before=V11_WORLD)
+ev(L, "PugLyfeDB.players['Alpha-Area52'] = { name = 'Alpha', realm = 'Area52', rating = 'down', note = 'left mid-boss', times = 3, lastSeen = time(), contexts = {} }")
+ev(L, "PugLyfeDB.players['Beta-Area52'] = { name = 'Beta', realm = 'Area52', times = 2, lastSeen = time(), contexts = {} }")
+ev(L, "PugLyfeDB.players['Pal-Area52'] = { name = 'Pal', realm = 'Area52', rating = 'up', times = 5, lastSeen = time(), contexts = {} }")
+ev(L, "PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Alpha-Area52', false, false, true, true, false, 'Player-1-0001')")
+out = said(L)
+check("an invite from someone you rated shows the block", "Invite from Alpha-Area52" in out and "thumbs down" in out and "grouped 3x" in out and "left mid-boss" in out, out)
+ev(L, "PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Beta', false, false, true, true, false, 'Player-1-0002')")
+out = said(L)
+check("...and for someone grouped with but unrated (name without realm)", "Invite from Beta" in out and "not rated yet" in out and "grouped 2x" in out, out)
+ev(L, "PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Nobody-Area52', false, false, true, true, false, 'Player-1-0003')")
+check("a stranger's invite says nothing", "Invite from" not in said(L))
+ev(L, "PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Pal-Area52', false, false, true, true, false, 'Player-1-0004')")
+check("a friend's invite is skipped (default)", "Invite from" not in said(L))
+ev(L, "PugLyfeDB.settings.skipKnown = false; PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Pal-Area52', false, false, true, true, false, 'Player-1-0004')")
+check("...unless that setting is off", "Invite from Pal" in said(L))
+ev(L, "PugLyfeDB.settings.inviteLine = false; PRINTED = {}; FireEvent('PARTY_INVITE_REQUEST', 'Alpha-Area52', false, false, true, true, false, 'Player-1-0001')")
+check("the invite line can be switched off", "Invite from" not in said(L))
+check("no errors", not errors(L))
+
+# ------------------------------------------------------------- surface 3: hover
+L = run("PUG Lyfe v1.1: tooltips (rated, grouped-before, strangers)", before=V11_WORLD)
+ev(L, "PugLyfeDB.players['Alpha-Area52'] = { name = 'Alpha', realm = 'Area52', rating = 'up', note = 'great healer', times = 2, lastSeen = time(), contexts = {} }")
+ev(L, "PugLyfeDB.players['Beta-Area52'] = { name = 'Beta', realm = 'Area52', times = 2, lastSeen = time(), contexts = {} }")
+ev(L, "TLINES = {}; MOUSE = P('Alpha', 'MAGE'); POSTCALLS[2](TOOLTIP)")
+line = L.eval("TLINES[1]")
+check("a rated player: thumb, times grouped, note", "thumbs up" in line and "grouped 2x" in line and "great healer" in line, line)
+ev(L, "TLINES = {}; MOUSE = P('Beta', 'MAGE'); POSTCALLS[2](TOOLTIP)")
+line = L.eval("TLINES[1]")
+check("grouped before but unrated: 'grouped 2x · not rated yet'", "grouped 2x" in line and "not rated yet" in line, line)
+ev(L, "TLINES = {}; MOUSE = P('Stranger', 'MAGE'); POSTCALLS[2](TOOLTIP)")
+check("a stranger gets no line", len(list(L.eval("TLINES").values())) == 0)
+ev(L, "TLINES = {}; MOUSE = P('Alpha', 'MAGE', { guild = true }); POSTCALLS[2](TOOLTIP)")
+check("a guildmate is skipped (default)", len(list(L.eval("TLINES").values())) == 0)
+ev(L, "PugLyfeDB.settings.skipKnown = false; TLINES = {}; MOUSE = P('Alpha', 'MAGE', { guild = true }); POSTCALLS[2](TOOLTIP)")
+check("...unless that setting is off", len(list(L.eval("TLINES").values())) == 1)
+
+# ----------------------------------------------------------------- surface 4: chat
+L = run("PUG Lyfe v1.1: chat tags", before=V11_WORLD)
+check("the filter is registered for group, raid, whisper, say and yell",
+      all(L.eval("CHATFILTERS[%r] ~= nil" % e) for e in ["CHAT_MSG_PARTY", "CHAT_MSG_RAID", "CHAT_MSG_WHISPER", "CHAT_MSG_SAY", "CHAT_MSG_YELL", "CHAT_MSG_INSTANCE_CHAT"]))
+ev(L, "PugLyfeDB.players['Alpha-Area52'] = { name = 'Alpha', realm = 'Area52', rating = 'down', times = 3, lastSeen = time(), contexts = {} }")
+ev(L, "PugLyfeDB.players['Beta-Area52'] = { name = 'Beta', realm = 'Area52', times = 2, lastSeen = time(), contexts = {} }")
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Alpha-Area52", "pull now")
+check("a rated player's line gets a thumb in front", hidden is False and "thumb_down" in msg and msg.endswith("pull now"), msg)
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Beta-Area52", "ready")
+check("an unrated player you've grouped with gets '[grouped 2x]'", "grouped 2x" in msg and msg.endswith("ready"), msg)
+hidden, msg = chat(L, "CHAT_MSG_WHISPER", "Beta", "hi")
+check("a name without a realm is found too (whisper)", "grouped 2x" in msg)
+hidden, msg = chat(L, "CHAT_MSG_SAY", "Nobody-Area52", "hello")
+check("a stranger's line is left exactly as it was", hidden is False and msg is None)
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Testchar", "me")
+check("your own lines are not tagged", msg is None)
+ev(L, "C_FriendList.IsFriend = function(g) return g == 'Player-1-FRIEND' end")
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Alpha-Area52", "hi", guid="Player-1-FRIEND")
+check("a friend is skipped (default)", msg is None)
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Alpha-Area52", 42)
+check("an odd message (not text) is passed through untouched", hidden is False and msg is None)
+ev(L, "PugLyfeDB.settings.chatTags = false")
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Alpha-Area52", "pull now")
+check("chat tags can be switched off (live)", msg is None)
+check("no errors", not errors(L))
+
+# ------------------------------------------------- retail Premade Groups marks
+L = run("PUG Lyfe v1.1: Premade Groups marks (retail)", before=V11_WORLD + r"""
+HOOKS = {}
+function hooksecurefunc(name, fn) HOOKS[name] = fn end
+function LFGListSearchEntry_Update() end
+function LFGListApplicationViewer_UpdateApplicantMember() end
+C_LFGList = { GetSearchResultInfo = function(id) return { leaderName = "Alpha-Area52" } end,
+              GetApplicantMemberInfo = function(app, i) return "Beta-Area52" end }
+""")
+ev(L, "PugLyfeDB.players['Alpha-Area52'] = { name = 'Alpha', realm = 'Area52', rating = 'down', times = 3, lastSeen = time(), contexts = {} }")
+ev(L, "PugLyfeDB.players['Beta-Area52'] = { name = 'Beta', realm = 'Area52', times = 2, lastSeen = time(), contexts = {} }")
+check("both Blizzard functions are post-hooked, not replaced", L.eval("HOOKS.LFGListSearchEntry_Update ~= nil and HOOKS.LFGListApplicationViewer_UpdateApplicantMember ~= nil"))
+ev(L, "ENTRY = CreateFrame('Button'); ENTRY.resultID = 7; HOOKS.LFGListSearchEntry_Update(ENTRY)")
+check("a search result whose leader you rated gets a mark", L.eval("rawget(ENTRY, 'PugLyfeMark') ~= nil") and "grouped 3x" in L.eval("rawget(ENTRY, 'PugLyfeMark'):GetText()"))
+ev(L, "MEMBER = CreateFrame('Button'); HOOKS.LFGListApplicationViewer_UpdateApplicantMember(MEMBER, 1, 1)")
+check("an applicant you've grouped with gets a mark", L.eval("rawget(MEMBER, 'PugLyfeMark') ~= nil") and "grouped 2x" in L.eval("rawget(MEMBER, 'PugLyfeMark'):GetText()"))
+ev(L, "C_LFGList.GetSearchResultInfo = function() return { leaderName = 'Nobody-Area52' } end; HOOKS.LFGListSearchEntry_Update(ENTRY)")
+check("a recycled row for a stranger loses its mark", not L.eval("rawget(ENTRY, 'PugLyfeMark'):IsShown()"))
+ev(L, "PugLyfeDB.settings.lfgMarks = false; C_LFGList.GetSearchResultInfo = function() return { leaderName = 'Alpha-Area52' } end; HOOKS.LFGListSearchEntry_Update(ENTRY)")
+check("the marks can be switched off", not L.eval("rawget(ENTRY, 'PugLyfeMark'):IsShown()"))
+check("no errors", not errors(L))
+
+L = run("PUG Lyfe v1.1: WoW Forever skips the Premade Groups part", game="forever", before=V11_WORLD + r"""
+HOOKS = {}
+function hooksecurefunc(name, fn) HOOKS[name] = fn end
+function LFGListSearchEntry_Update() end
+""")
+check("nothing is hooked on Forever", L.eval("next(HOOKS) == nil"))
+ev(L, "PugLyfeDB.players['Alpha-Area52'] = { name = 'Alpha', realm = 'Area52', rating = 'up', times = 1, lastSeen = time(), contexts = {} }")
+hidden, msg = chat(L, "CHAT_MSG_PARTY", "Alpha-Area52", "hi")
+check("...but chat tags work there", "thumb_up" in msg)
+check("no errors", not errors(L))
+
+# ---------------------------------------------------------------- settings + data
+L = run("PUG Lyfe v1.1: settings and data")
+ev(L, "SlashCmdList.PUGLYFE(''); PugLyfeWindow.gear._scripts.OnClick(PugLyfeWindow.gear)")
+keys = [L.eval("PugLyfeWindow.settings.toggles[%d].key" % i) for i in range(1, 11)]
+check("the four new toggles are in Settings", all(k in keys for k in ["joinChat", "inviteLine", "lfgMarks", "chatTags"]), keys)
+check("all four default to on", all(L.eval("PugLyfeDB.settings.%s" % k) is True for k in ["joinChat", "inviteLine", "lfgMarks", "chatTags"]))
+L = run("PUG Lyfe v1.1: a v1.0 save file upgrades untouched",
+        saved="""PugLyfeDB = { schemaVersion = 1, version = "Retail", settings = { askAfter = true, popup = false, tooltip = true, skipKnown = true, minimap = true, angle = 215 },
+          players = { ["Old-Area52"] = { name = "Old", realm = "Area52", rating = "up", note = "kept", times = 4, lastSeen = 5, firstSeen = 1, contexts = {} } } }""")
+p = players(L)["Old-Area52"]
+check("ratings, notes and counts are untouched", p.rating == "up" and p.note == "kept" and p.times == 4)
+check("old settings are kept and new ones get their defaults", L.eval("PugLyfeDB.settings.popup") is False and L.eval("PugLyfeDB.settings.chatTags") is True)
 
 print("\n%d passed" % passes)
 print("FAILURES:", fails if fails else "none")
