@@ -2623,7 +2623,7 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div class="stats" id="kstats" style="margin-top:4px"></div>
   <div class="card scroll"><table id="ktable"></table></div>
   <div id="kdetail"></div>
-  <div class="hint">From the Forge&#39;s Ledger: Kill Ledger companion addon, as of each character&#39;s last login. Drop % is the kills that dropped an item divided by kills, shown with the raw counts so a small sample reads as one. Your own loot only; prices are what a vendor pays. Click a mob to see its drops.</div>
+  <div class="hint">From the Forge&#39;s Ledger: Kill Ledger companion addon. WoW only writes its numbers to disk when you /reload or log out, so new kills show up here after one of those. Retail and Forever are separate views (top right). Drop % is the kills that dropped an item divided by kills, shown with the raw counts so a small sample reads as one. Your own loot only; prices are what a vendor pays. Click a mob to see its drops.</div>
 </section>
 
 <section id="tab-profs" hidden>
@@ -3034,7 +3034,10 @@ function renderKills(){
   $("kcount").textContent=list.length+" mob"+(list.length===1?"":"s");
   if(!list.length){
     $("kstats").innerHTML="";$("kdetail").innerHTML="";
-    $("ktable").innerHTML='<tbody><tr><td class="empty">'+(owners.length?(ui.kscope==="session"?"Nothing killed and looted yet in the latest session. Try Lifetime, or go kill something.":"No kills recorded yet."):"No Kill Ledger data yet - log into a character with the Kill Ledger addon enabled.")+"</td></tr></tbody>";
+    // The Kills tab is per game. A Retail view with no Kill Ledger data says so, and
+    // points at the Forever view (where players of WoW Forever have theirs) (KL-4).
+    const hint=!owners.length&&D.game!=="forever"&&D.forever_available?' <button class="btn" type="button" data-game="forever">Switch to the Forever view</button> (WoW Forever data is kept apart from Retail).':"";
+    $("ktable").innerHTML='<tbody><tr><td class="empty">'+(owners.length?(ui.kscope==="session"?"Nothing killed and looted yet in the latest session. Try Lifetime, or go kill something.":"No kills recorded yet."):"No Kill Ledger data in the "+(D.game==="forever"?"Forever":"Retail")+" view yet - log into a character with the Kill Ledger addon enabled."+hint)+"</td></tr></tbody>";
     return;
   }
   if(!list.some(m=>m.id===ui.kmob))ui.kmob=list[0].id;

@@ -481,6 +481,39 @@ class KillLedger(unittest.TestCase):
         self.assertIn("23s", out["coin"])
         self.assertIn("45c", out["coin"])
 
+    def test_each_game_view_says_where_the_data_is(self):
+        """KL-4: Forever data only shows in the Forever view. A Retail view with
+        nothing on the tab points there instead of just saying 'no data'."""
+        import shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        i = F.PAGE.index("/* ---------------- Kill Ledger")
+        j = F.PAGE.index("/* recent crafting")
+        harness = F.PAGE[i:j] + """
+        const els={};const $=id=>els[id]||(els[id]={});
+        const document={querySelectorAll:()=>[]};
+        const esc=s=>String(s==null?"":s),ago=()=>"x",stat=(v,l)=>v+" "+l,satelliteCard=()=>"";
+        const ui={kscope:"session",kchar:"",kmob:""};
+        function show(game,chars,fa){D={game,forever_available:fa,characters:chars};renderKills();return els.ktable.innerHTML}
+        let D;
+        const out={};
+        out.retailEmpty=show("retail",[],true);
+        out.retailNoForever=show("retail",[],false);
+        out.foreverEmpty=show("forever",[],true);
+        out.withData=show("forever",[{key:"a@b",name:"A",sat:{killledger:{mobs:{"1":{name:"Boar",kills:3,items:{}}},session:{mobs:{"1":{name:"Boar",kills:3,items:{}}}}}}}],true);
+        console.log(JSON.stringify(out));
+        """
+        r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertIn('data-game="forever"', out["retailEmpty"])
+        self.assertIn("Retail view", out["retailEmpty"])
+        self.assertNotIn('data-game="forever"', out["retailNoForever"])  # no Forever installed: nothing to point at
+        self.assertNotIn('data-game="forever"', out["foreverEmpty"])
+        self.assertIn("Forever view", out["foreverEmpty"])
+        self.assertIn("Boar", out["withData"])
+
 
 if __name__ == "__main__":
     unittest.main()
