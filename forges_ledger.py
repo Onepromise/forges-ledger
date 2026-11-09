@@ -2617,6 +2617,8 @@ input.wk{width:18px;height:18px;accent-color:var(--success);cursor:pointer}
   <div class="controls">
     <div class="seg" id="kscope"><button data-kscope="session">Latest session</button><button data-kscope="lifetime">Lifetime</button></div>
     <select id="kchar"></select>
+    <input type="search" id="kq" placeholder="Search mobs or zones">
+    <div class="seg" id="ksort"><button data-ksort="kills">Most kills</button><button data-ksort="recent">Most recent</button></div>
     <span class="count" id="kcount"></span>
   </div>
   <div id="ksatcard"></div>
@@ -2677,7 +2679,7 @@ let D=null;
 const CAT={};                 // tier id -> recipe catalog, fetched on demand
 const openCell=new Map();     // "charKey|profession" -> tier index shown below that row
 const moreClasses=new Set();  // class cards expanded past the first 8
-const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",kscope:"session",kchar:"",kmob:"",shopchar:"",concall:false,game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
+const ui=Object.assign({tab:"roster",q:"",cls:"",role:"",star:false,lvl:false,sort:"",dir:1,prof:"",pstar:false,scope:"all",crole:"",cview:"mounts",cown:"have",cq:"",lvstar:true,lv10:false,psec:false,wscope:"cap",dscope:"star",kscope:"session",kchar:"",kmob:"",kq:"",ksort:"kills",shopchar:"",concall:false,game:"retail",repchar:"",repview:"exp",rephide:false,repq:""},readUI());
 let COL=null,colLoading=false;  // collections payload, fetched when the tab is first opened
 
 // Open straight to a tab from the address, e.g. localhost:8765/#weekly -
@@ -3018,6 +3020,23 @@ function killAgg(chars,scope){
   });
   return list.sort((a,b)=>b.kills-a.kills||String(a.name||a.id).localeCompare(String(b.name||b.id)));
 }
+function killSort(list,mode){
+  const key=m=>mode==="recent"?m.last:0;
+  return list.slice().sort((a,b)=>(mode==="recent"?(key(b)-key(a)):0)||b.kills-a.kills||String(a.name||a.id).localeCompare(String(b.name||b.id)));
+}
+function killFilter(list,q){
+  q=String(q||"").trim().toLowerCase();
+  return q?list.filter(m=>(String(m.name||"")+" "+String(m.zone||"")).toLowerCase().includes(q)):list;
+}
+/* the sessions' pace, added up across characters: vendor value per hour */
+function killPace(chars){
+  let value=0,secs=0,n=0;
+  chars.forEach(c=>{
+    const p=c.sat&&c.sat.killledger&&c.sat.killledger.session&&c.sat.killledger.session.pace;
+    if(p&&typeof p==="object"){value+=+p.value||0;secs+=+p.seconds||0;n++}
+  });
+  return {value,secs,n,perHour:secs>=60?Math.round(value*3600/secs):null};
+}
 function dropPct(it,kills){
   if(!(kills>0))return "—";
   const p=100*it.dropEvents/kills;
@@ -3030,10 +3049,14 @@ function renderKills(){
   if(ui.kchar&&!owners.some(c=>c.key===ui.kchar))ui.kchar="";
   $("kchar").innerHTML='<option value="">All characters ('+owners.length+")</option>"+
     owners.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ui.kchar?" selected":"")+">"+esc(c.name)+"</option>").join("");
-  const list=killAgg(ui.kchar?owners.filter(c=>c.key===ui.kchar):owners,ui.kscope);
-  $("kcount").textContent=list.length+" mob"+(list.length===1?"":"s");
+  document.querySelectorAll("#ksort button").forEach(b=>b.classList.toggle("on",b.dataset.ksort===ui.ksort));
+  if($("kq").value!==ui.kq)$("kq").value=ui.kq||"";
+  const picked=ui.kchar?owners.filter(c=>c.key===ui.kchar):owners;
+  const all=killAgg(picked,ui.kscope),list=killSort(killFilter(all,ui.kq),ui.ksort);
+  $("kcount").textContent=list.length+" mob"+(list.length===1?"":"s")+(list.length!==all.length?" of "+all.length:"");
   if(!list.length){
     $("kstats").innerHTML="";$("kdetail").innerHTML="";
+    if(all.length){$("ktable").innerHTML='<tbody><tr><td class="empty">No mob matches &quot;'+esc(ui.kq)+'&quot;.</td></tr></tbody>';return}
     // The Kills tab is per game. A Retail view with no Kill Ledger data says so, and
     // points at the Forever view (where players of WoW Forever have theirs) (KL-4).
     const hint=!owners.length&&D.game!=="forever"&&D.forever_available?' <button class="btn" type="button" data-game="forever">Switch to the Forever view</button> (WoW Forever data is kept apart from Retail).':"";
@@ -3041,10 +3064,11 @@ function renderKills(){
     return;
   }
   if(!list.some(m=>m.id===ui.kmob))ui.kmob=list[0].id;
-  const kills=list.reduce((n,m)=>n+m.kills,0),value=list.reduce((n,m)=>n+m.value,0);
-  const top=list[0];
-  $("kstats").innerHTML=stat(kills.toLocaleString(),"kills")+stat(list.length.toLocaleString(),"different mobs")+
-    stat(coin(value),"vendor value of drops")+stat(esc(top.name||"Mob "+top.id),"most killed<br>"+top.kills.toLocaleString()+" kills");
+  const kills=all.reduce((n,m)=>n+m.kills,0),value=all.reduce((n,m)=>n+m.value,0);
+  const top=killSort(all,"kills")[0],pace=ui.kscope==="session"?killPace(picked):null;
+  $("kstats").innerHTML=stat(kills.toLocaleString(),"kills")+stat(all.length.toLocaleString(),"different mobs")+
+    stat(coin(value),"vendor value of drops")+
+    (pace&&pace.perHour!=null?stat(coin(pace.perHour),"vendor value per hour<br>this session"):stat(esc(top.name||"Mob "+top.id),"most killed<br>"+top.kills.toLocaleString()+" kills"));
   $("ktable").innerHTML='<thead><tr><th>Mob</th><th>Zone</th><th class="num">Kills</th><th class="num">Items seen</th><th class="num">Vendor value</th><th class="num">Per kill</th><th>Last kill</th></tr></thead><tbody>'+
     list.map(m=>'<tr class="clk'+(m.id===ui.kmob?" sel":"")+'" data-kmob="'+esc(m.id)+'"><td><b>'+esc(m.name||"Mob "+m.id)+"</b></td><td class=\"dim\">"+esc(m.zone||"")+
       '</td><td class="num"><b>'+m.kills.toLocaleString()+'</b></td><td class="num">'+Object.keys(m.items).length+
@@ -3697,7 +3721,7 @@ async function setRole(key,role){
   render();
 }
 document.addEventListener("click",async e=>{
-  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dscope],[data-kscope],[data-kmob],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
+  const el=e.target.closest("[data-tab],[data-sort],[data-prof],td.tc[data-k],[data-missing],[data-more],[data-scope],[data-cview],[data-cown],[data-track],[data-goal],[data-wscope],[data-dscope],[data-kscope],[data-ksort],[data-kmob],[data-dismiss-update],[data-game],[data-sat-dismiss],[data-repview]");
   if(!el)return;
   if(el.dataset.repview){ui.repview=el.dataset.repview;render()}
   else if(el.dataset.satDismiss){e.preventDefault();try{localStorage.setItem("satDismiss_"+el.dataset.satDismiss,"1")}catch(err){}render()}
@@ -3706,6 +3730,7 @@ document.addEventListener("click",async e=>{
   else if(el.dataset.wscope){ui.wscope=el.dataset.wscope;render()}
   else if(el.dataset.dscope){ui.dscope=el.dataset.dscope;render()}
   else if(el.dataset.kscope){ui.kscope=el.dataset.kscope;render()}
+  else if(el.dataset.ksort){ui.ksort=el.dataset.ksort;render()}
   else if(el.dataset.kmob){ui.kmob=el.dataset.kmob;render()}
   else if(el.dataset.track){setTracked(el.dataset.track,!el.classList.contains("on"))}
   else if(el.dataset.goal){goalAction(el.dataset.goal)}
@@ -3736,6 +3761,7 @@ document.addEventListener("change",e=>{
   if(map[t.id]){ui[map[t.id]]=t.type==="checkbox"?t.checked:t.value;render()}
 });
 $("q").addEventListener("input",e=>{ui.q=e.target.value;render()});
+$("kq").addEventListener("input",e=>{ui.kq=e.target.value;render()});
 $("cq").addEventListener("input",e=>{ui.cq=e.target.value;render()});
 $("repq").addEventListener("input",e=>{ui.repq=e.target.value;render()});
 $("syncbtn").addEventListener("click",async()=>{

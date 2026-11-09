@@ -38,7 +38,7 @@
 --   kill, and its stack size adds to the quantity. Slots locked for a group
 --   roll are skipped.
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Kill Ledger]|r "
 local KILL_TTL = 600        -- a corpse's loot is attributed for 10 minutes
@@ -89,11 +89,13 @@ local function CharData()
     return c
 end
 
+local Stamp, ShowToast   -- defined further down (export stamp + session pace; wishlist toast)
+
 local function Touch()
     local c = CharData()
-    c.exportedAt = time()
     c.data.name = UnitName("player")
     c.data.class = select(2, UnitClass("player"))
+    Stamp(c)
 end
 
 ---------------------------------------------------------------- the data ---
@@ -156,12 +158,13 @@ end
 -- yet stays nil (shown as "?"); 0 means the item doesn't sell to a vendor.
 local function ItemMeta(link)
     local GI = (C_Item and C_Item.GetItemInfo) or GetItemInfo
-    local name, _, quality, _, _, _, _, _, _, _, price = Try(GI, link)
-    return Plain(name), Plain(quality), Plain(price)
+    local name, _, quality, _, _, _, _, _, _, icon, price = Try(GI, link)
+    return Plain(name), Plain(quality), Plain(price), Plain(icon)
 end
 
-local function ApplyMeta(it, name, quality, price)
+local function ApplyMeta(it, name, quality, price, icon)
     if name then it.name = name end
+    if icon then it.icon = icon end
     if quality then it.quality = quality end
     if type(price) == "number" then
         it.price = price
@@ -212,8 +215,30 @@ local function CreditKill(guid, name, via)
     recentKills[guid] = { npc = npc, name = name, zone = zone, at = time(), looted = false }
     killCount = killCount + 1
     if via then DBG.via[via] = (DBG.via[via] or 0) + 1 end
-    c.exportedAt = time()
+    Stamp(c)
     if panel and panel:IsShown() then Render() end
+end
+
+-- The wishlist: items you want to see drop. Account-wide, in the save file.
+local function Wishlist()
+    local db = ForgesLedgerKillLedgerDB
+    db.wishlist = type(db.wishlist) == "table" and db.wishlist or {}
+    return db.wishlist
+end
+
+local function IsWished(id)
+    return id ~= nil and Wishlist()[tostring(id)] ~= nil
+end
+
+local function SetWish(id, on, name)
+    id = tostring(id)
+    local w = Wishlist()
+    if on then
+        w[id] = w[id] or { addedAt = time() }
+        if name then w[id].name = name end
+    else
+        w[id] = nil
+    end
 end
 
 -- Loot window: attribute own, unlocked item slots to their corpses.
@@ -247,6 +272,7 @@ local function ReadLoot()
     local c = CharData()
     local d = c.data
     local changed = false
+    local wished = {}   -- itemId -> what to celebrate (one toast per item per window)
     DBG.loots = DBG.loots + 1
     for guid in pairs(touched) do
         local k = recentKills[guid]
@@ -277,11 +303,28 @@ local function ReadLoot()
                     ApplyMeta(it, ItemMeta(e.link))
                 end
             end
+            for id, e in pairs(perCorpse[guid] or {}) do
+                if IsWished(id) then
+                    local w = wished[id]
+                    if not w then
+                        w = { id = id, qty = 0, mob = name, npc = k.npc }
+                        wished[id] = w
+                    end
+                    w.qty = w.qty + e.qty
+                end
+            end
             changed = true
         end
     end
+    for id, w in pairs(wished) do
+        local m = d.mobs[w.npc]
+        local it = m and m.items and m.items[id] or nil
+        w.it = it
+        w.name = (it and it.name) or (Wishlist()[id] and Wishlist()[id].name)
+        pcall(ShowToast, w)
+    end
     if changed then
-        c.exportedAt = time()
+        Stamp(c)
         if panel and panel:IsShown() then Render() end
     end
 end
@@ -311,6 +354,31 @@ local function Summary(m)
     return value, drops
 end
 
+-- This session across everything killed: kills, vendor value, seconds, value per hour.
+local function SessionStats()
+    local d = CharData().data
+    local kills, value = 0, 0
+    for _, m in pairs(d.session.mobs) do
+        kills = kills + (m.kills or 0)
+        value = value + (Summary(m))
+    end
+    local secs = math.max(0, time() - (tonumber(d.session.startedAt) or time()))
+    local perHour = secs >= 60 and math.floor(value * 3600 / secs) or nil
+    return kills, value, secs, perHour
+end
+
+-- Every change to the numbers goes through here: the save file's time stamp, and
+-- the session's pace (which the dashboard reads from the same export).
+Stamp = function(c)
+    c = c or CharData()
+    c.exportedAt = time()
+    local d = c.data
+    if d and d.session then
+        local kills, value, secs, perHour = SessionStats()
+        d.session.pace = { seconds = secs, kills = kills, value = value, perHour = perHour }
+    end
+end
+
 local function Coin(c)
     c = math.floor(tonumber(c) or 0)
     if GetCoinTextureString then return GetCoinTextureString(c) end
@@ -324,12 +392,16 @@ local function Pct(it, kills)
     return s .. " (" .. (it.dropEvents or 0) .. "/" .. kills .. ")"
 end
 
-local function Sorted(store)
+local function Sorted(store, mode)
     local list = {}
     for id, m in pairs(store) do
         tinsert(list, { id = id, m = m })
     end
     table.sort(list, function(a, b)
+        if mode == "recent" then
+            local ta, tb = tonumber(a.m.lastKill) or 0, tonumber(b.m.lastKill) or 0
+            if ta ~= tb then return ta > tb end
+        end
         if (a.m.kills or 0) ~= (b.m.kills or 0) then return (a.m.kills or 0) > (b.m.kills or 0) end
         return tostring(a.m.name or a.id) < tostring(b.m.name or b.id)
     end)
@@ -353,13 +425,23 @@ local BONE = { 0.92, 0.90, 0.85, 1 }
 local DIM = { 0.62, 0.60, 0.56, 1 }
 local IRON = { 0.07, 0.07, 0.09, 0.96 }
 local RUST = { 0.85, 0.40, 0.30, 1 }
-local W, H = 660, 470
-local LIST_ROWS, ITEM_ROWS = 14, 12
+local GREEN = { 0.45, 0.85, 0.35, 1 }
+local W, H = 940, 540
+local LIST_ROWS, ITEM_ROWS, WISH_ROWS = 12, 12, 14
 
-local scope = "session"   -- "session" or "lifetime"
+local scope = "session"   -- "session" | "lifetime" | "wishlist"
+local sortMode = "kills"  -- "kills" | "recent"
+local filterText = ""
 local selected            -- npc id
-local page = 1
+local page, itemPage = 1, 1
 local confirmAll = false
+
+-- what the window remembers between logins (the view and the sort, not the numbers)
+local function UI()
+    local db = ForgesLedgerKillLedgerDB
+    db.ui = type(db.ui) == "table" and db.ui or {}
+    return db.ui
+end
 
 local function Tex(frame, layer, r, g, b, a)
     local t = frame:CreateTexture(nil, layer)
@@ -400,7 +482,30 @@ local function Btn(parent, label, w, h)
     return b
 end
 
-local rows, irows = {}, {}
+local rows, irows, wrows = {}, {}, {}
+
+-- the colour a drop % reads in: common stays quiet, a good drop glows
+local function PctColor(p)
+    if p >= 50 then return "73b84d" end
+    if p >= 10 then return "ffd100" end
+    return "9a9890"
+end
+
+local function PctText(it, kills)
+    if (kills or 0) <= 0 then return "-" end
+    local p = 100 * (it.dropEvents or 0) / kills
+    local s = p >= 10 and string.format("%d%%", math.floor(p + 0.5)) or string.format("%.1f%%", p)
+    -- the raw count always sits beside the percentage
+    return "|cff" .. PctColor(p) .. s .. "|r |cff9a9890(" .. (it.dropEvents or 0) .. "/" .. kills .. ")|r"
+end
+
+local function Duration(s)
+    s = math.max(0, math.floor(tonumber(s) or 0))
+    local h, m = math.floor(s / 3600), math.floor(s / 60) % 60
+    if h > 0 then return string.format("%dh %02dm", h, m) end
+    if m > 0 then return string.format("%dm %02ds", m, s % 60) end
+    return s .. "s"
+end
 
 local function Store()
     local d = CharData().data
@@ -414,26 +519,107 @@ local function ItemColor(it)
     return BONE[1], BONE[2], BONE[3]
 end
 
+-- the best-known drop of a mob (its "top drop"), for the list row
+local function TopItem(m)
+    local best, bestId
+    for id, it in pairs(m.items or {}) do
+        if not best or (it.dropEvents or 0) > (best.dropEvents or 0) then best, bestId = it, id end
+    end
+    return best, bestId
+end
+
+local function Visible(store)
+    -- the mobs the list shows: filtered by the search box, in the chosen order
+    local list = Sorted(store, sortMode)
+    local f = filterText ~= "" and filterText:lower() or nil
+    if not f then return list end
+    local out = {}
+    for _, e in ipairs(list) do
+        local hay = (tostring(e.m.name or "") .. " " .. tostring(e.m.zone or "")):lower()
+        if hay:find(f, 1, true) then tinsert(out, e) end
+    end
+    return out
+end
+
+local function UpdateStrip()
+    if not panel then return end
+    local kills, value, secs, perHour = SessionStats()
+    panel.strip:SetText(string.format("Session  %s   |   %d kills   |   %s   |   %s",
+        Duration(secs), kills, Coin(value), perHour and (Coin(perHour) .. " per hour") or "per hour: soon"))
+    panel.stripSub:SetText("started " .. date("%H:%M", tonumber(CharData().data.session.startedAt) or time()))
+end
+
+local function SetItemIcon(tex, it, id)
+    local icon = it and it.icon
+    if not icon and id then
+        local GI = (C_Item and C_Item.GetItemIconByID) or GetItemIcon
+        icon = Plain(Try(GI, tonumber(id)))
+    end
+    if icon then tex:SetTexture(icon) else tex:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark") end
+    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+end
+
 function Render()
     if not panel then return end
+    local isWish = scope == "wishlist"
+    panel.tabSession:SetActive(scope == "session")
+    panel.tabLife:SetActive(scope == "lifetime")
+    panel.tabWish:SetActive(isWish)
+    UpdateStrip()
+    for _, f in ipairs(panel.mobUI) do f:SetShown(not isWish) end
+    for _, f in ipairs(panel.wishUI) do f:SetShown(isWish) end
+
+    if isWish then
+        -- ---- the wishlist view
+        local list = {}
+        for id, w in pairs(Wishlist()) do tinsert(list, { id = id, w = w }) end
+        table.sort(list, function(a, b) return tostring(a.w.name or a.id) < tostring(b.w.name or b.id) end)
+        panel.wishEmpty:SetText(#list == 0 and "Nothing on your wishlist yet. Click Wish on any drop row, or type /kl wish and shift-click an item. When one of these drops for you, you get a toast and a sound." or "")
+        -- how many of each you have seen drop, from the lifetime numbers
+        local seen = {}
+        for _, m in pairs(CharData().data.mobs) do
+            for id, it in pairs(m.items or {}) do seen[id] = (seen[id] or 0) + (it.qty or 0) end
+        end
+        for i = 1, WISH_ROWS do
+            local r, e = wrows[i], list[i]
+            if e then
+                r.id = e.id
+                local meta = nil
+                for _, m in pairs(CharData().data.mobs) do if m.items and m.items[e.id] then meta = m.items[e.id] break end end
+                r.name:SetText(tostring(e.w.name or (meta and meta.name) or ("Item " .. e.id)))
+                r.name:SetTextColor(ItemColor(meta or {}))
+                SetItemIcon(r.icon, meta, e.id)
+                r.seen:SetText((seen[e.id] or 0) > 0 and ("seen " .. seen[e.id] .. " so far") or "not seen yet")
+                r:Show()
+            else
+                r.id = nil
+                r:Hide()
+            end
+        end
+        panel.head3:SetText(#list .. " on your wishlist")
+        panel.foot:SetText("Your own loot only. A wishlisted drop gives you a toast and a sound.")
+        return
+    end
+
+    -- ---- the mob list (left)
     local store = Store()
-    local list = Sorted(store)
+    local list = Visible(store)
     local pages = math.max(1, math.ceil(#list / LIST_ROWS))
     if page > pages then page = pages end
     if page < 1 then page = 1 end
-    panel.tabSession:SetActive(scope == "session")
-    panel.tabLife:SetActive(scope == "lifetime")
-    -- the left list
+    panel.sortBtn:SetLabel(sortMode == "recent" and "Sort: recent" or "Sort: kills")
     local first = (page - 1) * LIST_ROWS
-    local selectedShown = false
     for i = 1, LIST_ROWS do
         local row, e = rows[i], list[first + i]
         if e then
             row.npc = e.id
             row.name:SetText(tostring(e.m.name or ("Mob " .. e.id)))
-            row.kills:SetText(tostring(e.m.kills or 0))
+            row.zone:SetText(tostring(e.m.zone or ""))
+            row.kills:SetText((e.m.kills or 0) .. " kills")
+            local top = TopItem(e.m)
+            row.top:SetText(top and ("top " .. PctText(top, e.m.kills)) or "no drops yet")
+            row.value:SetText(Coin((Summary(e.m))))
             row.sel:SetShown(e.id == selected)
-            if e.id == selected then selectedShown = true end
             row:Show()
         else
             row.npc = nil
@@ -442,48 +628,61 @@ function Render()
     end
     if not selected or not store[selected] then
         selected = list[1] and list[1].id or nil
-        if selected and rows[1].npc == selected then rows[1].sel:Show() end
+    end
+    for i = 1, LIST_ROWS do
+        if rows[i].npc then rows[i].sel:SetShown(rows[i].npc == selected) end
     end
     panel.pageLabel:SetText(#list > 0 and ("Page " .. page .. " of " .. pages) or "")
     panel.prev:SetShown(page > 1)
     panel.next:SetShown(page < pages)
     local totalKills, totalValue = 0, 0
-    for _, e in ipairs(list) do
+    for _, e in ipairs(Sorted(store, sortMode)) do
         totalKills = totalKills + (e.m.kills or 0)
         totalValue = totalValue + Summary(e.m)
     end
+    local nAll = 0
+    for _ in pairs(store) do nAll = nAll + 1 end
     panel.head3:SetText(string.format("%s: %d kills, %d mobs, %s in vendor value",
-        scope == "session" and "This session" or "Lifetime", totalKills, #list, Coin(totalValue)))
-    -- the detail
+        scope == "session" and "This session" or "Lifetime", totalKills, nAll, Coin(totalValue)))
+
+    -- ---- the detail (right)
     local m = selected and store[selected]
     for _, r in ipairs(irows) do r:Hide() end
     if not m then
         panel.dname:SetText("")
         panel.dsub:SetText("")
-        panel.empty:SetText(scope == "session"
-            and "Nothing killed yet this session. Kill something and loot it - it shows up here."
-            or "No kills recorded yet.")
+        panel.empty:SetText(#list == 0 and filterText ~= "" and ("No mob matches \"" .. filterText .. "\".")
+            or (scope == "session" and "Nothing killed yet this session. Kill something and loot it - it shows up here."
+                or "No kills recorded yet."))
         panel.empty:Show()
         panel.colhead:Hide()
         panel.more:SetText("")
         panel.resetMob:Hide()
+        panel.iprev:Hide(); panel.inext:Hide(); panel.ipage:SetText("")
     else
         panel.empty:Hide()
         panel.colhead:Show()
-        local value, _ = Summary(m)
+        local value = Summary(m)
         local kills = m.kills or 0
         panel.dname:SetText(tostring(m.name or ("Mob " .. selected)))
         panel.dsub:SetText(string.format("%s   |   Killed %d   |   Vendor value %s%s",
             tostring(m.zone or "?"), kills, Coin(value),
             kills > 0 and ("   (" .. Coin(value / kills) .. " per kill)") or ""))
         local items = SortedItems(m)
+        local ipages = math.max(1, math.ceil(#items / ITEM_ROWS))
+        if itemPage > ipages then itemPage = ipages end
+        if itemPage < 1 then itemPage = 1 end
+        local ifirst = (itemPage - 1) * ITEM_ROWS
         for i = 1, ITEM_ROWS do
-            local r, e = irows[i], items[i]
+            local r, e = irows[i], items[ifirst + i]
             if e then
                 local it = e.it
+                r.id = e.id
+                r.link = "item:" .. e.id
+                SetItemIcon(r.icon, it, e.id)
                 r.name:SetText(tostring(it.name or ("Item " .. e.id)))
                 r.name:SetTextColor(ItemColor(it))
-                r.pct:SetText(Pct(it, kills))
+                r.pct:SetText(PctText(it, kills))
                 local de = it.dropEvents or 0
                 r.avg:SetText(de > 0 and string.format("%.1f", (it.qty or 0) / de) or "-")
                 if it.noSell then
@@ -496,11 +695,16 @@ function Render()
                     r.each:SetText("?")
                     r.total:SetText("?")
                 end
+                local wished = IsWished(e.id)
+                r.wish:SetLabel(wished and "On list" or "Wish")
+                r.wish:SetActive(wished)
                 r:Show()
             end
         end
-        panel.more:SetText(#items > ITEM_ROWS and ("+" .. (#items - ITEM_ROWS) .. " more items - see them on the dashboard") or
-            (#items == 0 and "No drops seen yet." or ""))
+        panel.iprev:SetShown(itemPage > 1)
+        panel.inext:SetShown(itemPage < ipages)
+        panel.ipage:SetText(#items > ITEM_ROWS and string.format("Items %d-%d of %d", ifirst + 1, math.min(#items, ifirst + ITEM_ROWS), #items) or "")
+        panel.more:SetText(#items == 0 and "No drops seen yet." or "")
         panel.resetMob:Show()
     end
     panel.resetAll:SetLabel(confirmAll and "Click again to confirm" or "Reset all")
@@ -510,7 +714,27 @@ function Render()
         or "Counting kills when your target dies or you loot a corpse. Your own loot only; drop % = drops / kills.")
 end
 
+local function SetScope(s)
+    scope, page, itemPage, selected, confirmAll = s, 1, 1, nil, false
+    if s ~= "wishlist" then UI().scope = s end
+    Render()
+end
+
+local function ItemTooltip(row)
+    if not row.link then return end
+    pcall(function()
+        GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+        GameTooltip:SetHyperlink(row.link)
+        GameTooltip:Show()
+    end)
+end
+
+local function HideTooltip() pcall(function() GameTooltip:Hide() end) end
+
 local function CreatePanel()
+    local ui = UI()
+    if ui.scope == "lifetime" or ui.scope == "session" then scope = ui.scope end
+    if ui.sort == "recent" or ui.sort == "kills" then sortMode = ui.sort end
     panel = CreateFrame("Frame", "ForgesLedgerKillLedgerPanel", UIParent)
     panel:SetSize(W, H)
     panel:SetFrameStrata("HIGH")
@@ -537,111 +761,177 @@ local function CreatePanel()
     if type(pos) == "table" and type(pos[1]) == "string" then
         panel:SetPoint(pos[1], UIParent, pos[2] or pos[1], tonumber(pos[3]) or 0, tonumber(pos[4]) or 0)
     else
-        panel:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+        panel:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
     end
+    panel.mobUI, panel.wishUI = {}, {}
+
+    -- header: title, the session strip, the three views
     panel.title = Text(panel, "GameFontNormalLarge", GOLD)
-    panel.title:SetPoint("TOPLEFT", 16, -14)
+    panel.title:SetPoint("TOPLEFT", 16, -12)
     panel.title:SetText("Kill Ledger")
+    panel.strip = Text(panel, "GameFontNormal", BONE)
+    panel.strip:SetPoint("LEFT", panel.title, "RIGHT", 22, 0)
+    panel.stripSub = Text(panel, "GameFontHighlightSmall", DIM)
+    panel.stripSub:SetPoint("TOPLEFT", 16, -34)
     panel.head3 = Text(panel, "GameFontHighlightSmall", DIM)
-    panel.head3:SetPoint("TOPLEFT", 16, -38)
-
+    panel.head3:SetPoint("LEFT", panel.stripSub, "RIGHT", 16, 0)
     panel.tabSession = Btn(panel, "This session", 100, 22)
-    panel.tabSession:SetPoint("TOPRIGHT", -150, -14)
-    panel.tabSession:SetScript("OnClick", function() scope, page, selected, confirmAll = "session", 1, nil, false; Render() end)
-    panel.tabLife = Btn(panel, "Lifetime", 90, 22)
+    panel.tabSession:SetPoint("TOPRIGHT", -190, -38)
+    panel.tabSession:SetScript("OnClick", function() SetScope("session") end)
+    panel.tabLife = Btn(panel, "Lifetime", 80, 22)
     panel.tabLife:SetPoint("LEFT", panel.tabSession, "RIGHT", 6, 0)
-    panel.tabLife:SetScript("OnClick", function() scope, page, selected, confirmAll = "lifetime", 1, nil, false; Render() end)
+    panel.tabLife:SetScript("OnClick", function() SetScope("lifetime") end)
+    panel.tabWish = Btn(panel, "Wishlist", 80, 22)
+    panel.tabWish:SetPoint("LEFT", panel.tabLife, "RIGHT", 6, 0)
+    panel.tabWish:SetScript("OnClick", function() SetScope("wishlist") end)
 
-    -- left: the mobs
-    local lh = Text(panel, "GameFontNormal", GOLD)
-    lh:SetPoint("TOPLEFT", 16, -64)
-    lh:SetText("Mob")
-    local lk = Text(panel, "GameFontNormal", GOLD)
-    lk:SetPoint("TOPLEFT", 196, -64)
-    lk:SetText("Kills")
+    -- left: search, sort, the mobs
+    local function MobPart(f) tinsert(panel.mobUI, f); return f end
+    local sb = MobPart(CreateFrame("Frame", nil, panel))
+    sb:SetSize(214, 22)
+    sb:SetPoint("TOPLEFT", 14, -64)
+    Tex(sb, "BACKGROUND", 0, 0, 0, 0.5):SetAllPoints()
+    Border(sb, 0.3)
+    panel.search = CreateFrame("EditBox", nil, sb)
+    panel.search:SetPoint("TOPLEFT", 6, -2)
+    panel.search:SetPoint("BOTTOMRIGHT", -6, 2)
+    panel.search:SetFontObject("GameFontHighlight")
+    panel.search:SetAutoFocus(false)
+    panel.search:SetMaxLetters(40)
+    panel.searchHint = Text(sb, "GameFontHighlightSmall", DIM)
+    panel.searchHint:SetPoint("LEFT", 8, 0)
+    panel.searchHint:SetText("Search mobs or zones")
+    panel.search:SetScript("OnTextChanged", function(self)
+        filterText = strtrim(self:GetText() or "")
+        panel.searchHint:SetShown((self:GetText() or "") == "")
+        page, selected = 1, nil
+        Render()
+    end)
+    panel.search:SetScript("OnEscapePressed", function(self) self:SetText(""); self:ClearFocus() end)
+    panel.search:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    panel.sortBtn = MobPart(Btn(panel, "Sort: kills", 100, 22))
+    panel.sortBtn:SetPoint("LEFT", sb, "RIGHT", 6, 0)
+    panel.sortBtn:SetScript("OnClick", function()
+        sortMode = sortMode == "kills" and "recent" or "kills"
+        UI().sort = sortMode
+        page = 1
+        Render()
+    end)
     for i = 1, LIST_ROWS do
-        local r = CreateFrame("Button", nil, panel)
-        r:SetSize(230, 22)
-        r:SetPoint("TOPLEFT", 12, -82 - (i - 1) * 24)
+        local r = MobPart(CreateFrame("Button", nil, panel))
+        r:SetSize(344, 32)
+        r:SetPoint("TOPLEFT", 12, -92 - (i - 1) * 34)
         r.sel = Tex(r, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.18)
         r.sel:SetAllPoints()
         r.sel:Hide()
+        Tex(r, "BORDER", 1, 1, 1, 0.05):SetPoint("BOTTOMLEFT")
         r.name = Text(r, "GameFontHighlight")
-        r.name:SetPoint("LEFT", 4, 0)
-        r.name:SetWidth(176)
+        r.name:SetPoint("TOPLEFT", 4, -2)
+        r.name:SetWidth(200)
         r.name:SetJustifyH("LEFT")
         r.name:SetWordWrap(false)
         r.kills = Text(r, "GameFontNormal", GOLD)
-        r.kills:SetPoint("LEFT", 186, 0)
+        r.kills:SetPoint("TOPRIGHT", -6, -2)
+        r.zone = Text(r, "GameFontHighlightSmall", DIM)
+        r.zone:SetPoint("BOTTOMLEFT", 4, 3)
+        r.zone:SetWidth(120)
+        r.zone:SetJustifyH("LEFT")
+        r.zone:SetWordWrap(false)
+        r.top = Text(r, "GameFontHighlightSmall")
+        r.top:SetPoint("BOTTOMLEFT", 128, 3)
+        r.value = Text(r, "GameFontHighlightSmall", BONE)
+        r.value:SetPoint("BOTTOMRIGHT", -6, 3)
         r:SetScript("OnClick", function(self)
-            if self.npc then selected, confirmAll = self.npc, false; Render() end
+            if self.npc then selected, itemPage, confirmAll = self.npc, 1, false; Render() end
         end)
         rows[i] = r
     end
-    panel.prev = Btn(panel, "<", 28, 20)
-    panel.prev:SetPoint("BOTTOMLEFT", 16, 44)
+    panel.prev = MobPart(Btn(panel, "<", 28, 20))
+    panel.prev:SetPoint("BOTTOMLEFT", 14, 40)
     panel.prev:SetScript("OnClick", function() page = page - 1; Render() end)
-    panel.next = Btn(panel, ">", 28, 20)
+    panel.next = MobPart(Btn(panel, ">", 28, 20))
     panel.next:SetPoint("LEFT", panel.prev, "RIGHT", 4, 0)
     panel.next:SetScript("OnClick", function() page = page + 1; Render() end)
-    panel.pageLabel = Text(panel, "GameFontHighlightSmall", DIM)
+    panel.pageLabel = MobPart(Text(panel, "GameFontHighlightSmall", DIM))
     panel.pageLabel:SetPoint("LEFT", panel.next, "RIGHT", 8, 0)
 
     -- right: the drop table
-    panel.dname = Text(panel, "GameFontNormalLarge", BONE)
-    panel.dname:SetPoint("TOPLEFT", 262, -64)
-    panel.dsub = Text(panel, "GameFontHighlightSmall", DIM)
-    panel.dsub:SetPoint("TOPLEFT", 262, -88)
-    panel.empty = Text(panel, "GameFontHighlight", DIM)
-    panel.empty:SetPoint("TOPLEFT", 262, -120)
-    panel.empty:SetWidth(380)
+    panel.dname = MobPart(Text(panel, "GameFontNormalLarge", BONE))
+    panel.dname:SetPoint("TOPLEFT", 376, -64)
+    panel.dsub = MobPart(Text(panel, "GameFontHighlightSmall", DIM))
+    panel.dsub:SetPoint("TOPLEFT", 376, -90)
+    panel.empty = MobPart(Text(panel, "GameFontHighlight", DIM))
+    panel.empty:SetPoint("TOPLEFT", 376, -124)
+    panel.empty:SetWidth(540)
     panel.empty:SetJustifyH("LEFT")
     panel.empty:SetWordWrap(true)
-    panel.colhead = CreateFrame("Frame", nil, panel)
-    panel.colhead:SetSize(390, 18)
-    panel.colhead:SetPoint("TOPLEFT", 262, -112)
-    local cols = { { "Item", 0 }, { "Drop %", 150 }, { "Avg", 238 }, { "Each", 276 }, { "Total", 340 } }
-    for _, c in ipairs(cols) do
+    panel.colhead = MobPart(CreateFrame("Frame", nil, panel))
+    panel.colhead:SetSize(552, 18)
+    panel.colhead:SetPoint("TOPLEFT", 376, -112)
+    for _, c in ipairs({ { "Item", 28 }, { "Drop %", 184 }, { "Avg", 296 }, { "Each", 332 }, { "Total", 424 } }) do
         local fs = Text(panel.colhead, "GameFontNormal", GOLD)
         fs:SetPoint("LEFT", c[2], 0)
         fs:SetText(c[1])
     end
     for i = 1, ITEM_ROWS do
-        local r = CreateFrame("Frame", nil, panel)
-        r:SetSize(390, 22)
-        r:SetPoint("TOPLEFT", 262, -132 - (i - 1) * 24)
+        local r = MobPart(CreateFrame("Button", nil, panel))
+        r:SetSize(552, 26)
+        r:SetPoint("TOPLEFT", 376, -132 - (i - 1) * 28)
+        Tex(r, "HIGHLIGHT", 1, 1, 1, 0.06):SetAllPoints()
+        r.icon = r:CreateTexture(nil, "ARTWORK")
+        r.icon:SetSize(22, 22)
+        r.icon:SetPoint("LEFT", 2, 0)
         r.name = Text(r, "GameFontHighlight")
-        r.name:SetPoint("LEFT", 0, 0)
-        r.name:SetWidth(146)
+        r.name:SetPoint("LEFT", 28, 0)
+        r.name:SetWidth(152)
         r.name:SetJustifyH("LEFT")
         r.name:SetWordWrap(false)
         r.pct = Text(r, "GameFontHighlight")
-        r.pct:SetPoint("LEFT", 150, 0)
+        r.pct:SetPoint("LEFT", 184, 0)
         r.avg = Text(r, "GameFontHighlight", DIM)
-        r.avg:SetPoint("LEFT", 238, 0)
+        r.avg:SetPoint("LEFT", 296, 0)
         r.each = Text(r, "GameFontHighlight", DIM)
-        r.each:SetPoint("LEFT", 276, 0)
+        r.each:SetPoint("LEFT", 332, 0)
         r.total = Text(r, "GameFontHighlight")
-        r.total:SetPoint("LEFT", 340, 0)
+        r.total:SetPoint("LEFT", 424, 0)
+        r.wish = Btn(r, "Wish", 58, 20)
+        r.wish:SetPoint("RIGHT", -2, 0)
+        r.wish:SetScript("OnClick", function()
+            if not r.id then return end
+            local on = not IsWished(r.id)
+            local items = selected and Store()[selected] and Store()[selected].items
+            SetWish(r.id, on, items and items[r.id] and items[r.id].name)
+            Render()
+        end)
+        r:SetScript("OnEnter", ItemTooltip)
+        r:SetScript("OnLeave", HideTooltip)
         irows[i] = r
     end
-    panel.more = Text(panel, "GameFontHighlightSmall", DIM)
-    panel.more:SetPoint("TOPLEFT", 262, -132 - ITEM_ROWS * 24)
+    panel.more = MobPart(Text(panel, "GameFontHighlightSmall", DIM))
+    panel.more:SetPoint("TOPLEFT", 376, -132 - ITEM_ROWS * 28)
+    panel.iprev = MobPart(Btn(panel, "<", 28, 20))
+    panel.iprev:SetPoint("BOTTOMLEFT", 376, 40)
+    panel.iprev:SetScript("OnClick", function() itemPage = itemPage - 1; Render() end)
+    panel.inext = MobPart(Btn(panel, ">", 28, 20))
+    panel.inext:SetPoint("LEFT", panel.iprev, "RIGHT", 4, 0)
+    panel.inext:SetScript("OnClick", function() itemPage = itemPage + 1; Render() end)
+    panel.ipage = MobPart(Text(panel, "GameFontHighlightSmall", DIM))
+    panel.ipage:SetPoint("LEFT", panel.inext, "RIGHT", 8, 0)
 
     -- bottom: resets and the note
-    panel.resetMob = Btn(panel, "Reset this mob", 110, 22)
-    panel.resetMob:SetPoint("BOTTOMRIGHT", -16, 40)
+    panel.resetMob = MobPart(Btn(panel, "Reset this mob", 110, 22))
+    panel.resetMob:SetPoint("BOTTOMRIGHT", -16, 38)
     panel.resetMob:SetScript("OnClick", function()
         if selected then
             local d = CharData().data
             d.mobs[selected] = nil
             d.session.mobs[selected] = nil
             selected, confirmAll = nil, false
-            CharData().exportedAt = time()
+            Stamp(CharData())
             Render()
         end
     end)
-    panel.resetAll = Btn(panel, "Reset all", 90, 22)
+    panel.resetAll = MobPart(Btn(panel, "Reset all", 90, 22))
     panel.resetAll:SetPoint("RIGHT", panel.resetMob, "LEFT", -6, 0)
     panel.resetAll:SetScript("OnClick", function()
         if not confirmAll then
@@ -652,14 +942,56 @@ local function CreatePanel()
             d.mobs, d.session.mobs = {}, {}
             for g in pairs(recentKills) do recentKills[g] = nil end
             selected, confirmAll = nil, false
-            CharData().exportedAt = time()
+            Stamp(CharData())
         end
         Render()
     end)
+
+    -- the wishlist view
+    local function WishPart(f) tinsert(panel.wishUI, f); return f end
+    panel.wishEmpty = WishPart(Text(panel, "GameFontHighlight", DIM))
+    panel.wishEmpty:SetPoint("TOPLEFT", 16, -70)
+    panel.wishEmpty:SetWidth(700)
+    panel.wishEmpty:SetJustifyH("LEFT")
+    panel.wishEmpty:SetWordWrap(true)
+    for i = 1, WISH_ROWS do
+        local r = WishPart(CreateFrame("Button", nil, panel))
+        r:SetSize(560, 28)
+        r:SetPoint("TOPLEFT", 16, -118 - (i - 1) * 30)
+        Tex(r, "HIGHLIGHT", 1, 1, 1, 0.06):SetAllPoints()
+        r.icon = r:CreateTexture(nil, "ARTWORK")
+        r.icon:SetSize(22, 22)
+        r.icon:SetPoint("LEFT", 2, 0)
+        r.name = Text(r, "GameFontHighlight")
+        r.name:SetPoint("LEFT", 32, 0)
+        r.name:SetWidth(300)
+        r.name:SetJustifyH("LEFT")
+        r.name:SetWordWrap(false)
+        r.seen = Text(r, "GameFontHighlightSmall", DIM)
+        r.seen:SetPoint("LEFT", 346, 0)
+        r.remove = Btn(r, "Remove", 70, 20)
+        r.remove:SetPoint("RIGHT", -2, 0)
+        r.remove:SetScript("OnClick", function()
+            if r.id then SetWish(r.id, false); Render() end
+        end)
+        r:SetScript("OnEnter", function(self) if self.id then self.link = "item:" .. self.id; ItemTooltip(self) end end)
+        r:SetScript("OnLeave", HideTooltip)
+        wrows[i] = r
+        r:Hide()
+    end
+
     panel.foot = Text(panel, "GameFontHighlightSmall", DIM)
-    panel.foot:SetPoint("BOTTOMLEFT", 16, 14)
-    panel.foot:SetWidth(W - 32)
+    panel.foot:SetPoint("BOTTOMLEFT", 14, 14)
+    panel.foot:SetWidth(W - 28)
     panel.foot:SetJustifyH("LEFT")
+
+    -- the strip ticks once a second while the window is open
+    local acc = 0
+    panel:SetScript("OnUpdate", function(_, dt)
+        acc = acc + (tonumber(dt) or 0)
+        if acc >= 1 then acc = 0; UpdateStrip() end
+    end)
+    panel.rows, panel.irows, panel.wrows = rows, irows, wrows   -- (the tests look at the rows)
     tinsert(UISpecialFrames, "ForgesLedgerKillLedgerPanel")
     panel:Hide()
 end
@@ -673,6 +1005,74 @@ end
 
 local function TogglePanel()
     if panel and panel:IsShown() then panel:Hide() else ShowPanel() end
+end
+
+------------------------------------------------------------------- toasts ---
+-- A wishlisted item dropped for you: one toast per item per loot window,
+-- shown one at a time, with a sound. Plain frames and OnUpdate (no animation
+-- groups), so it behaves the same on every client.
+
+local toast, toastQueue, toastCur = nil, {}, nil
+local TOAST_IN, TOAST_HOLD, TOAST_OUT = 0.25, 3.2, 0.6
+
+local function ToastSound()
+    if type(PlaySound) ~= "function" then return end
+    local id = (SOUNDKIT and (SOUNDKIT.UI_EPICLOOT_TOAST or SOUNDKIT.UI_LEGENDARY_LOOT_TOAST)) or 888
+    pcall(PlaySound, id)
+end
+
+local function NextToast()
+    local t = tremove(toastQueue, 1)
+    if not t then toastCur = nil; toast:Hide(); return end
+    toastCur = { age = 0, data = t }
+    SetItemIcon(toast.icon, t.it, t.id)
+    toast.title:SetText("Wishlist drop!")
+    toast.item:SetText(tostring(t.name or ("Item " .. t.id)) .. (t.qty > 1 and (" x" .. t.qty) or ""))
+    toast.item:SetTextColor(ItemColor(t.it or {}))
+    toast.sub:SetText(t.mob and ("from " .. t.mob) or "")
+    toast:SetAlpha(0)
+    toast:Show()
+    ToastSound()
+end
+
+local function CreateToast()
+    toast = CreateFrame("Frame", "ForgesLedgerKillLedgerToast", UIParent)
+    toast:SetSize(340, 66)
+    toast:SetFrameStrata("FULLSCREEN_DIALOG")
+    toast:SetPoint("TOP", UIParent, "TOP", 0, -150)
+    toast:EnableMouse(false)
+    Tex(toast, "BACKGROUND", IRON[1], IRON[2], IRON[3], 0.95):SetAllPoints()
+    Border(toast, 0.9)
+    toast.icon = toast:CreateTexture(nil, "ARTWORK")
+    toast.icon:SetSize(44, 44)
+    toast.icon:SetPoint("LEFT", 10, 0)
+    toast.title = Text(toast, "GameFontNormal", GOLD)
+    toast.title:SetPoint("TOPLEFT", 64, -10)
+    toast.item = Text(toast, "GameFontNormalLarge", BONE)
+    toast.item:SetPoint("TOPLEFT", 64, -26)
+    toast.item:SetWidth(266)
+    toast.item:SetJustifyH("LEFT")
+    toast.item:SetWordWrap(false)
+    toast.sub = Text(toast, "GameFontHighlightSmall", DIM)
+    toast.sub:SetPoint("BOTTOMLEFT", 64, 8)
+    toast:SetScript("OnUpdate", function(_, dt)
+        if not toastCur then return end
+        toastCur.age = toastCur.age + (tonumber(dt) or 0)
+        local a = toastCur.age
+        local alpha = 1
+        if a < TOAST_IN then alpha = a / TOAST_IN
+        elseif a > TOAST_IN + TOAST_HOLD then alpha = 1 - (a - TOAST_IN - TOAST_HOLD) / TOAST_OUT end
+        toast:SetAlpha(math.max(0, math.min(1, alpha)))
+        if a >= TOAST_IN + TOAST_HOLD + TOAST_OUT then NextToast() end
+    end)
+    toast:Hide()
+end
+
+-- t = { id, name, qty, mob, it }
+ShowToast = function(t)
+    if not toast then CreateToast() end
+    tinsert(toastQueue, t)
+    if not toastCur then NextToast() end
 end
 
 ------------------------------------------------------------------ events ---
@@ -794,8 +1194,33 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
     if cmd == "" or cmd == "open" then
         TogglePanel()
     elseif cmd == "session" or cmd == "lifetime" then
-        scope, page, selected = cmd, 1, nil
         ShowPanel()
+        SetScope(cmd)
+    elseif cmd == "sort recent" or cmd == "sort kills" then
+        sortMode = cmd:match("%S+$")
+        UI().sort = sortMode
+        print(PREFIX .. "Mobs sorted by " .. (sortMode == "recent" and "most recent kill." or "most kills."))
+        if panel and panel:IsShown() then Render() end
+    elseif cmd == "wishlist" then
+        local n = 0
+        for id, w in pairs(Wishlist()) do
+            n = n + 1
+            print("  " .. tostring(w.name or ("item " .. id)) .. "  (item " .. id .. ")")
+        end
+        print(PREFIX .. (n == 0 and "Your wishlist is empty. /kl wish [shift-click an item], or Wish on a drop row."
+            or (n .. " on your wishlist. /kl wish <item> adds or removes one.")))
+    elseif cmd:match("^wish%s") or cmd:match("^unwish%s") then
+        local arg = strtrim(msg or ""):match("^%S+%s+(.+)$") or ""
+        local id = ItemId(arg) or arg:match("^%d+$")
+        if not id then
+            print(PREFIX .. "Shift-click an item (or give its number): /kl wish [item]")
+        else
+            local remove = cmd:match("^unwish") ~= nil or IsWished(id)
+            local name = arg:match("%[(.-)%]") or (ItemMeta("item:" .. id))
+            SetWish(id, not remove, name)
+            print(PREFIX .. (remove and "Removed from" or "Added to") .. " your wishlist: " .. tostring(name or ("item " .. id)))
+            if panel and panel:IsShown() then Render() end
+        end
     elseif cmd == "combatlog on" or cmd == "combatlog off" then
         ForgesLedgerKillLedgerDB.combatLog = (cmd == "combatlog on")
         print(PREFIX .. "Combat-log counting " .. (cmd == "combatlog on" and "ON" or "OFF") .. " after /reload."
@@ -818,6 +1243,8 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         print(PREFIX .. "v" .. VERSION .. " commands:")
         print("  /kl - open or close the panel")
         print("  /kl session, /kl lifetime - open on that view")
+        print("  /kl sort recent|kills - order the mob list")
+        print("  /kl wishlist - list your wishlist; /kl wish [item] adds or removes one")
         print("  /kl reset session - clear this session's numbers")
         print("  /kl debug - what the counters saw (for bug reports)")
         print("  /kl combatlog on|off - count kills from the combat log instead (needs /reload; off by default)")

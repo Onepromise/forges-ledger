@@ -66,7 +66,7 @@ function GetItemInfo(link)
   local id = tonumber(tostring(link):match("item:(%d+)"))
   local it = ITEMS[id]
   if not it then return nil end
-  return it[1], link, it[2], 1, 1, "Misc", "Junk", 1, "", 0, it[3]
+  return it[1], link, it[2], 1, 1, "Misc", "Junk", 1, "", 100000 + id, it[3]
 end
 function L(id) return "|cffffffff|Hitem:" .. id .. "::::::::1:::::::::|h[" .. (ITEMS[id] and ITEMS[id][1] or "?") .. "]|h|r" end
 -- the loot window
@@ -80,6 +80,9 @@ function LOOT(slots) SLOTS = slots; FireEvent("LOOT_OPENED"); RunTimers() end
 function G(npc, n) return string.format("Creature-0-1-1-1-%d-%05d", npc, n or 1) end
 function ITEMSLOT(id, guid, qty, locked) return { type = 1, link = L(id), sources = { guid, qty or 1 }, locked = locked } end
 function MONEYSLOT(guid) return { type = 2, sources = { guid, 5 } } end
+HYPER, SOUNDS = nil, {}
+GameTooltip.SetHyperlink = function(self, l) HYPER = l end
+function PlaySound(id) table.insert(SOUNDS, id) end
 '''
 
 
@@ -211,7 +214,7 @@ kill(R, 2, 1, name="Wolf")
 ev(R, "LOOT({ ITEMSLOT(100, G(1, 1), 2), ITEMSLOT(103, G(1, 1)) })")
 ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('')")
 P = "ForgesLedgerKillLedgerPanel"
-check("the list shows the most-killed mob first", R.eval(P + ".rows") is None and R.eval("nil") is None)
+check("the list shows the most-killed mob first", R.eval(P + ".rows[1].name:GetText()") == "Boar")
 text = R.eval("""(function()
   local o = {}
   for _, f in ipairs(ALL_FRAMES) do
@@ -345,6 +348,193 @@ ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('debug')")
 out = " ".join(R.eval("PRINTED").values())
 check("an unparseable guid is counted and its shape shown", "guid shapes not parsed: Creature-weird" in out, out[-200:])
 check("no errors", not errors(R))
+
+# ======================================================= UI build (Luna's spec) ===
+P = "ForgesLedgerKillLedgerPanel"
+
+
+def row_names(R, which="rows"):
+    return list(R.eval("(function() local o = {} for _, r in ipairs(%s.%s) do if r._shown then o[#o + 1] = r.name:GetText() end end return o end)()" % (P, which)).values())
+
+
+def texts(R):
+    return R.eval("""(function()
+      local o = {}
+      for _, f in ipairs(ALL_FRAMES) do
+        if f._kind == "FontString" and f._text ~= "" and f:IsShown() then o[#o + 1] = f._text end
+      end
+      return table.concat(o, "\\n")
+    end)()""")
+
+
+def slash(R, cmd):
+    ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER(%s)" % ("[=[" + cmd + "]=]"))
+
+
+R = run("Kill Ledger UI: mob rows, sort, zone, colored drop %")
+for n, (npc, name) in enumerate([(1, "Boar"), (2, "Wolf"), (3, "Bear")], 1):
+    ev(R, "AdvanceTime(10)")
+    for k in range(1, 4 - n + 1):
+        kill(R, npc, k, name=name)
+ev(R, "LOOT({ ITEMSLOT(100, G(2, 1), 1) })")
+slash(R, "")
+names = row_names(R)
+check("default order: most kills first", names[0] == "Boar" and names[-1] == "Bear", names)
+rowtxt = texts(R)
+check("each mob row shows its zone", "Elwynn Forest" in rowtxt)
+check("each mob row shows its vendor total and top drop", "top" in rowtxt)
+topn = [R.eval("%s.rows[%d].top:GetText()" % (P, i)) for i in (1, 2, 3)]
+check("the top drop % is colored and sits beside the raw count", any("|cff" in t and "(1/2)" in t for t in topn), topn)
+ev(R, "%s.sortBtn._scripts.OnClick()" % P)
+names = row_names(R)
+check("Sort: recent puts the newest kill first", names[0] == "Bear" and "recent" in R.eval("%s.sortBtn.text:GetText()" % P), names)
+ev(R, "%s.sortBtn._scripts.OnClick()" % P)
+check("and back to most kills", row_names(R)[0] == "Boar")
+slash(R, "sort recent")
+check("/kl sort recent does the same", row_names(R)[0] == "Bear" and R.eval("ForgesLedgerKillLedgerDB.ui.sort") == "recent")
+check("no errors", not errors(R))
+
+R = run("Kill Ledger UI: mob search")
+for npc, name in [(1, "Stonetusk Boar"), (2, "Timber Wolf"), (3, "Young Wolf")]:
+    kill(R, npc, 1, name=name)
+slash(R, "")
+ev(R, '%s.search:SetText("wolf"); %s.search._scripts.OnTextChanged(%s.search)' % (P, P, P))
+names = sorted(row_names(R))
+check("typing in the search box filters the mob list", names == ["Timber Wolf", "Young Wolf"], names)
+check("the hint hides while there is text", not R.eval("%s.searchHint:IsShown()" % P))
+ev(R, '%s.search:SetText("elwynn"); %s.search._scripts.OnTextChanged(%s.search)' % (P, P, P))
+check("the search reads zones too", len(row_names(R)) == 3)
+ev(R, '%s.search:SetText("zzz"); %s.search._scripts.OnTextChanged(%s.search)' % (P, P, P))
+check("no match says so", "No mob matches" in R.eval("%s.empty:GetText()" % P) and len(row_names(R)) == 0)
+ev(R, '%s.search._scripts.OnEscapePressed(%s.search)' % (P, P))
+ev(R, '%s.search._scripts.OnTextChanged(%s.search)' % (P, P))
+check("Escape clears the box", len(row_names(R)) == 3 and R.eval("%s.searchHint:IsShown()" % P))
+
+R = run("Kill Ledger UI: drop rows - icons, tooltips, paging")
+ev(R, "for i = 300, 329 do ITEMS[i] = { 'Thing ' .. i, 1, 5 } end")
+kill(R, 7, 1, name="Hoarder")
+ev(R, "local s = {} for i = 300, 329 do s[#s + 1] = ITEMSLOT(i, G(7, 1)) end LOOT(s)")
+slash(R, "")
+ev(R, "%s.rows[1]._scripts.OnClick(%s.rows[1])" % (P, P))
+n_shown = len(row_names(R, "irows"))
+check("12 drop rows on the first page", n_shown == 12, n_shown)
+check("the footer line says which items are shown", "Items 1-12 of 30" in R.eval("%s.ipage:GetText()" % P))
+ic = R.eval("%s.irows[1].icon._tex" % P)
+check("an item row has its icon", ic is not None and ic >= 100000, ic)
+ev(R, "%s.irows[1]._scripts.OnEnter(%s.irows[1])" % (P, P))
+check("hovering a drop row asks for the real item tooltip", str(R.eval("HYPER")).startswith("item:3"), R.eval("HYPER"))
+ev(R, "%s.inext._scripts.OnClick()" % P)
+check("the next page shows items 13-24", "Items 13-24 of 30" in R.eval("%s.ipage:GetText()" % P))
+ev(R, "%s.inext._scripts.OnClick(); %s.inext._scripts.OnClick()" % (P, P))
+check("the last page shows the remaining 6", "Items 25-30 of 30" in R.eval("%s.ipage:GetText()" % P) and len(row_names(R, "irows")) == 6)
+check("no errors", not errors(R))
+
+R = run("Kill Ledger UI: the session strip")
+slash(R, "")
+strip = R.eval("%s.strip:GetText()" % P)
+check("the strip shows an empty session", "Session" in strip and "0 kills" in strip, strip)
+kill(R, 1, 1, name="Boar")
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 1), 2) })")
+strip = R.eval("%s.strip:GetText()" % P)
+check("kills and vendor gold show at once", "1 kills" in strip, strip)
+check("under a minute the pace says so", "per hour: soon" in strip, strip)
+ev(R, "AdvanceTime(1800)")
+ev(R, "%s._scripts.OnUpdate(%s, 1.2)" % (P, P))
+strip = R.eval("%s.strip:GetText()" % P)
+check("the strip ticks by itself and shows the duration", "30m" in strip, strip)
+check("...and gold per hour once there is a minute of data", "per hour" in strip and "soon" not in strip, strip)
+slash(R, "lifetime")
+check("the strip stays visible on the Lifetime view", "Session" in R.eval("%s.strip:GetText()" % P))
+
+R = run("Kill Ledger UI: the view is remembered across logins")
+slash(R, "lifetime")
+slash(R, "sort recent")
+saved = R.eval("ForgesLedgerKillLedgerDB.ui")
+check("the view and sort are saved", saved["scope"] == "lifetime" and saved["sort"] == "recent")
+R = run("Kill Ledger UI: ...and restored", saved="""ForgesLedgerKillLedgerDB = { combatLog = true, ui = { scope = "lifetime", sort = "recent" } }""")
+slash(R, "")
+check("it opens on Lifetime, sorted by recent", "Lifetime" in R.eval("%s.head3:GetText()" % P) and "recent" in R.eval("%s.sortBtn.text:GetText()" % P))
+
+R = run("Kill Ledger UI: the loot wishlist")
+slash(R, "wishlist")
+check("/kl wishlist says when it is empty", "empty" in " ".join(R.eval("PRINTED").values()))
+ev(R, "PRINTED = {}")
+slash(R, "wish " + "|cffffffff|Hitem:104::::::::1:::::::::|h[Strange Gem]|h|r")
+check("/kl wish [item link] adds it", R.eval("ForgesLedgerKillLedgerDB.wishlist['104'] ~= nil") and "Added" in " ".join(R.eval("PRINTED").values()), R.eval("PRINTED"))
+ev(R, "PRINTED = {}")
+slash(R, "wishlist")
+check("/kl wishlist lists it in chat", "Strange Gem" in " ".join(R.eval("PRINTED").values()), list(R.eval("PRINTED").values()))
+slash(R, "wish 100")
+check("an item number works too", R.eval("ForgesLedgerKillLedgerDB.wishlist['100'] ~= nil"))
+slash(R, "wish 100")
+check("the same command again removes it", R.eval("ForgesLedgerKillLedgerDB.wishlist['100'] == nil"))
+slash(R, "unwish 104")
+check("/kl unwish removes", R.eval("ForgesLedgerKillLedgerDB.wishlist['104'] == nil"))
+
+# drops
+kill(R, 1, 1, name="Boar"); kill(R, 1, 2, name="Boar")
+slash(R, "wish 101")
+ev(R, "SOUNDS = {}; LOOT({ ITEMSLOT(100, G(1, 1), 1) })")
+check("an item that is NOT wishlisted gives no toast", not shown(R, "ForgesLedgerKillLedgerToast") and R.eval("#SOUNDS") == 0)
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 2), 2) })")
+check("a wishlisted drop shows a toast", shown(R, "ForgesLedgerKillLedgerToast"))
+check("...with the item, the count and the mob", "Worn Dagger" in R.eval("ForgesLedgerKillLedgerToast.item:GetText()") and "from Boar" in R.eval("ForgesLedgerKillLedgerToast.sub:GetText()"), R.eval("ForgesLedgerKillLedgerToast.sub:GetText()"))
+check("...and a sound", R.eval("#SOUNDS") == 1)
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 2), 2) })")
+check("reopening the same corpse does not toast again", R.eval("#SOUNDS") == 1)
+T = "ForgesLedgerKillLedgerToast"
+ev(R, "%s._scripts.OnUpdate(%s, 0.1)" % (T, T))
+a1 = R.eval("%s._alpha" % T)
+ev(R, "%s._scripts.OnUpdate(%s, 1.0)" % (T, T))
+check("the toast fades in and holds", a1 is not None and a1 < 1 and R.eval("%s._alpha" % T) == 1, a1)
+ev(R, "%s._scripts.OnUpdate(%s, 5)" % (T, T))
+check("then it goes away by itself", not shown(R, T))
+# AoE loot over two corpses: one toast, summed
+ev(R, "SOUNDS = {}")
+kill(R, 1, 3, name="Boar"); kill(R, 1, 4, name="Boar")
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 3), 1), ITEMSLOT(101, G(1, 4), 2) })")
+check("AoE loot of the same wishlisted item gives ONE toast with the total", R.eval("#SOUNDS") == 1 and " x3" in R.eval("%s.item:GetText()" % T), R.eval("%s.item:GetText()" % T))
+ev(R, "%s._scripts.OnUpdate(%s, 9)" % (T, T))
+# two different wishlisted items in one window: shown one at a time
+slash(R, "wish 100")
+ev(R, "SOUNDS = {}")
+kill(R, 1, 5, name="Boar")
+ev(R, "LOOT({ ITEMSLOT(100, G(1, 5), 1), ITEMSLOT(101, G(1, 5), 1) })")
+check("two wishlisted items: the first shows, the second waits its turn", R.eval("#SOUNDS") == 1, R.eval("#SOUNDS"))
+ev(R, "%s._scripts.OnUpdate(%s, 9)" % (T, T))
+check("...and the second follows", R.eval("#SOUNDS") == 2, R.eval("#SOUNDS"))
+ev(R, "%s._scripts.OnUpdate(%s, 9)" % (T, T))
+check("...then it is gone", not shown(R, T))
+
+# the window
+slash(R, "")
+ev(R, "%s.tabWish._scripts.OnClick()" % P)
+wn = row_names(R, "wrows")
+check("the Wishlist tab lists the entries", len(wn) == 2, wn)
+ev(R, "%s.wrows[1].remove._scripts.OnClick()" % P)
+check("Remove takes one off", len(row_names(R, "wrows")) == 1)
+ev(R, "%s.tabSession._scripts.OnClick()" % P)
+ev(R, "%s.rows[1]._scripts.OnClick(%s.rows[1])" % (P, P))
+wid = R.eval("%s.irows[1].id" % P)
+was = R.eval("ForgesLedgerKillLedgerDB.wishlist[%s.irows[1].id] ~= nil" % P)
+ev(R, "%s.irows[1].wish._scripts.OnClick()" % P)
+now = R.eval("ForgesLedgerKillLedgerDB.wishlist[%r] ~= nil" % wid)
+check("the Wish button on a drop row toggles that item", now != was, (wid, was, now))
+check("no errors", not errors(R))
+
+R = run("Kill Ledger UI: the wishlist is saved", saved="""ForgesLedgerKillLedgerDB = { combatLog = true, wishlist = { ["101"] = { name = "Worn Dagger", addedAt = 5 } } }""")
+kill(R, 1, 1, name="Boar")
+ev(R, "SOUNDS = {}; LOOT({ ITEMSLOT(101, G(1, 1), 1) })")
+check("a wishlist from an earlier session still celebrates", R.eval("#SOUNDS") == 1)
+
+R = run("Kill Ledger UI: pace in the export for the dashboard")
+kill(R, 1, 1, name="Boar")
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 1), 4) })")
+ev(R, "AdvanceTime(3600)")
+kill(R, 1, 2, name="Boar")
+pace = R.eval("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].data.session.pace")
+check("pace: kills, value, seconds and per hour", pace["kills"] == 2 and pace["value"] == 4 * 250 and pace["seconds"] >= 3600 and pace["perHour"] is not None, dict(pace))
+check("per hour is value / hours", abs(pace["perHour"] - 1000) <= 2, pace["perHour"])
 
 R = run("Kill Ledger: WoW Forever", before="WOW_PROJECT_ID, WOW_PROJECT_MAINLINE = 2, 1")
 check("it works on Forever and says so in the save file", R.eval("ForgesLedgerKillLedgerDB.version") == "Forever")

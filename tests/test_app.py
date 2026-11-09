@@ -514,6 +514,45 @@ class KillLedger(unittest.TestCase):
         self.assertIn("Forever view", out["foreverEmpty"])
         self.assertIn("Boar", out["withData"])
 
+    def test_the_kills_tab_sorts_searches_and_shows_pace(self):
+        """The in-game UI build's dashboard side: sort by most recent, search, pace."""
+        import shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        i = F.PAGE.index("/* ---------------- Kill Ledger")
+        j = F.PAGE.index("/* recent crafting")
+        harness = F.PAGE[i:j] + """
+        const mob=(name,zone,kills,last)=>({name,zone,kills,lastKill:last,items:{}});
+        const ch=(mobs,pace)=>({sat:{killledger:{mobs,session:{mobs:{},pace}}}});
+        const a=ch({"1":mob("Stonetusk Boar","Elwynn",30,100),"2":mob("Timber Wolf","Elwynn",20,300),"3":mob("Young Wolf","Dun Morogh",5,200)},{seconds:3600,kills:10,value:5000,perHour:5000});
+        const b=ch({"4":mob("Kobold","Elwynn",1,50)},{seconds:1800,kills:2,value:2500});
+        const list=killAgg([a,b],"lifetime"),out={};
+        out.byKills=killSort(list,"kills").map(m=>m.name);
+        out.byRecent=killSort(list,"recent").map(m=>m.name);
+        out.wolf=killFilter(list,"WOLF").map(m=>m.name).sort();
+        out.zone=killFilter(list,"dun morogh").map(m=>m.name);
+        out.none=killFilter(list,"zzz").length;
+        out.all=killFilter(list,"  ").length;
+        const pace=killPace([a,b]);
+        out.perHour=pace.perHour;out.n=pace.n;
+        out.noPace=killPace([{sat:{killledger:{mobs:{},session:{mobs:{}}}}},{sat:{}}]).perHour;
+        out.short=killPace([ch({}, {seconds:30,value:100})]).perHour;
+        console.log(JSON.stringify(out));
+        """
+        r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["byKills"], ["Stonetusk Boar", "Timber Wolf", "Young Wolf", "Kobold"])
+        self.assertEqual(out["byRecent"], ["Timber Wolf", "Young Wolf", "Stonetusk Boar", "Kobold"])
+        self.assertEqual(out["wolf"], ["Timber Wolf", "Young Wolf"])
+        self.assertEqual(out["zone"], ["Young Wolf"])
+        self.assertEqual((out["none"], out["all"]), (0, 4))
+        # 7500 value over 5400 s = 5000 per hour; two characters counted
+        self.assertEqual((out["perHour"], out["n"]), (5000, 2))
+        self.assertIsNone(out["noPace"])
+        self.assertIsNone(out["short"])  # under a minute of data: no per-hour claim
+
 
 if __name__ == "__main__":
     unittest.main()
