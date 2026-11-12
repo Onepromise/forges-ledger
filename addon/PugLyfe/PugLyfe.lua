@@ -698,7 +698,7 @@ end
 
 ----------------------------------------------------------- the main window ---
 
-local W, H, LIST_W, ROW_H, ROWS = 590, 430, 280, 26, 12
+local W, H, LIST_W, ROW_H, ROWS = 590, 500, 280, 26, 14   -- H fits 10 settings rows + Export + footer (BUG PUG-2)
 local win, rows, offset, selected, filter, search, panel = nil, {}, 0, nil, "all", "", "detail"
 
 local FILTERS = {

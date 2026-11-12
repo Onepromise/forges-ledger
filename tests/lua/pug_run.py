@@ -409,6 +409,20 @@ for i in range(1, 11):
     end)()""" % i)
 check("every settings row is pinned to both edges of the panel", ok)
 
+# BUG PUG-2: 10 rows + Export button + footer must fit the panel height with nothing overlapping
+geo = L.eval("""(function()
+    local win, sp = PugLyfeWindow, PugLyfeWindow.settings
+    local panelH = win:GetHeight() - 82 - 12
+    local lastRow = sp.toggles[10].state._parent
+    local rowY = lastRow._points[1][5]
+    return { panelH = panelH, lastRowBottom = -(rowY - 30) }
+end)()""")
+check("10th settings row ends well inside the panel", geo.lastRowBottom < geo.panelH - 60, (geo.lastRowBottom, geo.panelH))
+EXPORT_BOTTOM = 8 + 10 * 32 + 12 + 22   # rows, gap, Export button height
+FOOT_TOP = L.eval("PugLyfeWindow:GetHeight()") - 94 - 4 - 24   # panel height minus footer (2 small lines)
+check("Export button clears the footer block (no overlap)", EXPORT_BOTTOM < FOOT_TOP - 8, (EXPORT_BOTTOM, FOOT_TOP))
+check("the list still shows a whole number of rows in its taller column", L.eval("PugLyfeWindow:GetHeight()") - 124 >= 14 * 26)
+
 # ============================================================ v1.1 recognition ===
 V11_WORLD = r"""
 CHATFILTERS = {}
