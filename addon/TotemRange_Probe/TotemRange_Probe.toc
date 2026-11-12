@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: Totem Range PROBE (throwaway)
+## Notes: Step 0 test build for Totem Range. Finds out what the game exposes about totems, your position and the minimap, then prints a report. Type /trprobe. Delete it once the report is sent.
+## Author: Forge at Crescent Cove
+## Version: 0.1
+## SavedVariables: TotemRangeProbeDB
+TotemRange_Probe.lua
