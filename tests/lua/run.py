@@ -41,7 +41,7 @@ def run(title, game="retail", satellite=True, saved=None, extra=""):
         code = open(path, encoding="utf-8").read()
         chunk = L.eval("function(code, n) local f, err = loadstring(code, '@'..n); if not f then error(err) end; return f end")(code, name)
         chunk(name.split("/")[0], ns_)
-    for f in ["ForgesLedger.lua", "ForgesLedger_Windows.lua", "ForgesLedger_Bar.lua"]:
+    for f in ["ForgesLedger.lua", "ForgesLedger_Windows.lua", "ForgesLedger_Bar.lua", "ForgesLedger_XP.lua"]:
         load(os.path.join(ADDON, "ForgesLedger", f), "ForgesLedger/" + f, ns)
     if satellite:
         load(os.path.join(ADDON, "ForgesLedger_Professions", "ForgesLedger_Professions.lua"),
@@ -689,7 +689,7 @@ def run_d(title, saved="", extra="", core_api=True):
     L.execute(open(os.path.join(HERE, "wowmock.lua"), encoding="utf-8").read())
     L.execute(RETAIL); L.execute(extra)
     ns = L.eval("{}")
-    for f in ["ForgesLedger.lua", "ForgesLedger_Windows.lua", "ForgesLedger_Bar.lua"]:
+    for f in ["ForgesLedger.lua", "ForgesLedger_Windows.lua", "ForgesLedger_Bar.lua", "ForgesLedger_XP.lua"]:
         code = open(os.path.join(ADDON, "ForgesLedger", f), encoding="utf-8").read()
         L.eval("function(c, n, ns) assert(loadstring(c, '@' .. n))('ForgesLedger', ns) end")(code, f, ns)
     if not core_api:
