@@ -9,14 +9,17 @@ ns = ns or {}
 local UI = {}
 ns.UI = UI
 
-local GOLD = { 1, 0.82, 0 }
-local GOLD_HI = { 1, 0.92, 0.45 }
-local BONE = { 0.95, 0.93, 0.88 }
-local BONE_DIM = { 0.76, 0.74, 0.70 }     -- the quiet text: still readable over bright scenery
+-- The blue System palette (Forge's ruling 2026-11-13: gold is out). Deep midnight glass, luminous
+-- cyan / ice-blue lines and glow, ice-white text, pale-blue secondary text.
+local ACCENT = { 0.35, 0.85, 1 }          -- luminous cyan: borders, brackets, glow, rules
+local ICE = { 0.78, 0.95, 1 }             -- ice blue: bright highlights, the glowing title
+local BONE = { 0.92, 0.97, 1 }            -- ice white: primary text
+local BONE_DIM = { 0.66, 0.79, 0.90 }     -- pale blue: quiet text, still readable over bright scenery
+local FILL = { 0.2, 0.8, 1 }              -- the XP / progress fill
 local RED = { 0.9, 0.28, 0.22 }
 local GREEN = { 0.45, 0.85, 0.35 }
-local IRON = { 0.03, 0.03, 0.05, 0.97 }   -- near-solid
-ns.STYLE = { bgAlpha = IRON[4] }
+local IRON = { 0.02, 0.04, 0.09, 0.97 }   -- midnight-blue glass, near-solid
+ns.STYLE = { bgAlpha = IRON[4], palette = "blue" }
 
 local function Settings() return ForgeChallengeDB and ForgeChallengeDB.settings or {} end
 
@@ -45,7 +48,7 @@ end
 -- The System frame: backdrop, double rule, corner brackets, outer glow. Returns the parts so a
 -- window can be recoloured (the penalty window is red) -- sys.recolor(color).
 local function System(f, accent)
-    accent = accent or GOLD
+    accent = accent or ACCENT
     local sys = { parts = {} }
     local function add(t, base) t._base = base; sys.parts[#sys.parts + 1] = t; return t end
     sys.bg = Tex(f, "BACKGROUND", IRON[1], IRON[2], IRON[3], IRON[4])
@@ -86,7 +89,7 @@ local function GlowText(parent, font, color, x, y, point)
     for _, d in ipairs({ { -1, 0 }, { 1, 0 }, { 0, 1 }, { 0, -1 } }) do
         local g = parent:CreateFontString(nil, "ARTWORK", font)
         g:SetPoint(point or "TOPLEFT", x + d[1], y + d[2])
-        g:SetTextColor(1, 0.55, 0.1)
+        g:SetTextColor(0.2, 0.6, 1)
         g:SetAlpha(0.35)
         glows[#glows + 1] = g
     end
@@ -98,10 +101,10 @@ end
 
 -- a section header with a thin gold rule under it
 local function Section(parent, text, y)
-    local fs = Text(parent, "GameFontNormal", GOLD)
+    local fs = Text(parent, "GameFontNormal", ACCENT)
     fs:SetPoint("TOPLEFT", 16, y)
     fs:SetText(text)
-    local r = Tex(parent, "ARTWORK", GOLD[1], GOLD[2], GOLD[3], 0.55)
+    local r = Tex(parent, "ARTWORK", ACCENT[1], ACCENT[2], ACCENT[3], 0.55)
     r:SetPoint("TOPLEFT", parent, "TOPLEFT", 16, y - 18)
     r:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -16, y - 18)
     r:SetHeight(1)
@@ -109,7 +112,7 @@ local function Section(parent, text, y)
 end
 
 local function Btn(parent, label, w, accent)
-    accent = accent or GOLD
+    accent = accent or ACCENT
     local b = CreateFrame("Button", nil, parent)
     b:SetSize(w or 90, 24)
     Tex(b, "BACKGROUND", accent[1] * 0.25, accent[2] * 0.25, accent[3] * 0.25, 0.9):SetAllPoints()
@@ -125,7 +128,7 @@ end
 
 -- the header band across the top of a window: a glowing title and the emblem
 local function Header(f, title, accent)
-    accent = accent or GOLD
+    accent = accent or ACCENT
     local band = Tex(f, "ARTWORK", accent[1], accent[2], accent[3], 0.12)
     band:SetPoint("TOPLEFT", f, "TOPLEFT", 5, -5)
     band:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -5)
@@ -135,11 +138,11 @@ local function Header(f, title, accent)
     rule:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -39)
     rule:SetHeight(1)
     local emblem = f:CreateTexture(nil, "OVERLAY")
-    emblem:SetTexture("Interface\\Icons\\Spell_Fire_Fire")
+    emblem:SetTexture("Interface\\Icons\\Spell_Frost_FrostBolt02")
     emblem:SetSize(22, 22)
     emblem:SetPoint("TOPLEFT", 14, -10)
     emblem:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    local t = GlowText(f, "GameFontNormalLarge", GOLD_HI, 42, -12)
+    local t = GlowText(f, "GameFontNormalLarge", ICE, 42, -12)
     t:SetText(title)
     return t, band
 end
@@ -192,12 +195,12 @@ local function BuildPopup()
     pop:SetSize(380, 92)
     pop:SetFrameStrata("HIGH")
     pop:SetPoint("TOP", UIParent, "TOP", 0, -140)
-    pop.sys = System(pop, GOLD)
-    pop.kicker = GlowText(pop, "GameFontNormal", GOLD_HI, 0, -12, "TOP")
+    pop.sys = System(pop, ACCENT)
+    pop.kicker = GlowText(pop, "GameFontNormal", ICE, 0, -12, "TOP")
     pop.main = Text(pop, "GameFontNormalLarge", BONE)
     pop.main:SetPoint("TOP", pop, "TOP", 0, -34)
     pop.main:SetWidth(340)
-    pop.sub = Text(pop, "GameFontNormal", GOLD)
+    pop.sub = Text(pop, "GameFontNormal", ACCENT)
     pop.sub:SetPoint("TOP", pop.main, "BOTTOM", 0, -6)
     pop.sub:SetWidth(340)
     pop:EnableMouse(true)
@@ -238,7 +241,7 @@ end
 local function Enqueue(item)
     if not Settings().popups then return end
     BuildPopup()
-    item.color = item.color or GOLD
+    item.color = item.color or ACCENT
     queue[#queue + 1] = item
     UI.Next()
 end
@@ -254,7 +257,7 @@ function UI.LevelUp(level, rankName, gained)
             flash = CreateFrame("Frame", "ForgeChallengeFlash", UIParent)
             flash:SetAllPoints(UIParent)
             flash:SetFrameStrata("FULLSCREEN_DIALOG")
-            flash.tex = Tex(flash, "BACKGROUND", GOLD[1], GOLD[2], GOLD[3], 0.2)
+            flash.tex = Tex(flash, "BACKGROUND", ACCENT[1], ACCENT[2], ACCENT[3], 0.2)
             flash.tex:SetAllPoints()
             flash:EnableMouse(false)
             flash:SetScript("OnUpdate", function(self, dt)
@@ -268,7 +271,7 @@ function UI.LevelUp(level, rankName, gained)
     local main = "Level " .. level
     local sub = rankName and ("RANK UP: " .. rankName) or ((gained or 1) > 1 and (gained .. " levels") or "The Challenge grows stronger")
     Enqueue({ kicker = rankName and "LEVEL UP  -  RANK UP" or "LEVEL UP", main = main, sub = sub, sound = "level",
-              color = rankName and GOLD_HI or GOLD })
+              color = rankName and ICE or ACCENT })
 end
 
 function UI.Flush()
@@ -276,6 +279,7 @@ function UI.Flush()
     if UI.penaltyWanted and UI.penaltyFrame and not UI.penaltyFrame:IsShown() and not Held() then UI.penaltyFrame:Show() end
     if UI.gateWanted and UI.gateFrame and not Held() then UI.gateFrame:Show() end
     if UI.dailyWanted and UI.dailyFrame and not Held() then UI.dailyFrame:Show() end
+    if UI.trackWanted and UI.trackFrame and not Held() then UI.trackFrame:Show() end
 end
 
 -- ------------------------------------------------------------ gate window
@@ -286,8 +290,8 @@ local function BuildGate()
     gate:SetSize(360, 96)
     gate:SetFrameStrata("HIGH")
     PlaceFrom(gate, "gate", { "TOP", "TOP", 0, -250 })
-    gate.sys = System(gate, GOLD)
-    gate.kicker = GlowText(gate, "GameFontNormal", GOLD_HI, 0, -14, "TOP")
+    gate.sys = System(gate, ACCENT)
+    gate.kicker = GlowText(gate, "GameFontNormal", ICE, 0, -14, "TOP")
     gate.body = Text(gate, "GameFontHighlightSmall", BONE)
     gate.body:SetPoint("TOP", gate, "TOP", 0, -42)
     gate.body:SetWidth(320)
@@ -334,7 +338,7 @@ local function BuildPenalty()
     pen.note:SetPoint("TOP", pen.text, "BOTTOM", 0, -10)
     pen.note:SetWidth(380)
     pen.note:SetText("A missed day. Finish this before the next reset to save your streak. Decline and the streak resets: nothing else is lost.")
-    pen.accept = Btn(pen, "Accept", 120, GOLD)
+    pen.accept = Btn(pen, "Accept", 120, ACCENT)
     pen.accept:SetPoint("BOTTOMRIGHT", pen, "BOTTOM", -8, 16)
     pen.decline = Btn(pen, "Decline", 120, RED)
     pen.decline:SetPoint("BOTTOMLEFT", pen, "BOTTOM", 8, 16)
@@ -361,20 +365,20 @@ local function BuildStatus()
     status:SetSize(STATUS_W, 330)
     status:SetFrameStrata("MEDIUM")
     PlaceFrom(status, "status", { "CENTER", "CENTER", -300, 0 })
-    status.sys = System(status, GOLD)
+    status.sys = System(status, ACCENT)
     Movable(status, "status")
-    status.title = Header(status, "Forge's Challenge", GOLD)
+    status.title = Header(status, "Forge's Challenge", ACCENT)
     status.name = Text(status, "GameFontHighlight", BONE)
     status.name:SetPoint("TOPLEFT", PAD, -52)
     -- the rank as a framed chip
     status.chip = CreateFrame("Frame", nil, status)
     status.chip:SetSize(116, 24)
     status.chip:SetPoint("TOPRIGHT", -PAD, -49)
-    status.chipBg = Tex(status.chip, "BACKGROUND", 0.95, 0.5, 0.2, 0.22)
+    status.chipBg = Tex(status.chip, "BACKGROUND", 0.4, 0.65, 0.95, 0.22)
     status.chipBg:SetAllPoints()
-    status.chipLines = { Line(status.chip, "T", 0, 1, GOLD, 0.95), Line(status.chip, "B", 0, 1, GOLD, 0.95),
-                         Line(status.chip, "L", 0, 1, GOLD, 0.95), Line(status.chip, "R", 0, 1, GOLD, 0.95) }
-    status.rank = Text(status.chip, "GameFontNormal", GOLD)
+    status.chipLines = { Line(status.chip, "T", 0, 1, ACCENT, 0.95), Line(status.chip, "B", 0, 1, ACCENT, 0.95),
+                         Line(status.chip, "L", 0, 1, ACCENT, 0.95), Line(status.chip, "R", 0, 1, ACCENT, 0.95) }
+    status.rank = Text(status.chip, "GameFontNormal", ACCENT)
     status.rank:SetPoint("CENTER")
     status.level = Text(status, "GameFontNormalLarge", BONE)
     status.level:SetPoint("TOPLEFT", PAD, -80)
@@ -385,21 +389,24 @@ local function BuildStatus()
     status.barFrame = CreateFrame("Frame", nil, status)
     status.barFrame:SetSize(BAR_W, 20)
     status.barFrame:SetPoint("TOPLEFT", PAD, -110)
-    Line(status.barFrame, "T", 0, 1, GOLD, 0.7); Line(status.barFrame, "B", 0, 1, GOLD, 0.7)
-    Line(status.barFrame, "L", 0, 1, GOLD, 0.7); Line(status.barFrame, "R", 0, 1, GOLD, 0.7)
-    status.barGlow = Tex(status, "ARTWORK", GOLD[1], GOLD[2], GOLD[3], 0.16)
+    Line(status.barFrame, "T", 0, 1, ACCENT, 0.7); Line(status.barFrame, "B", 0, 1, ACCENT, 0.7)
+    Line(status.barFrame, "L", 0, 1, ACCENT, 0.7); Line(status.barFrame, "R", 0, 1, ACCENT, 0.7)
+    status.barGlow = Tex(status, "ARTWORK", ACCENT[1], ACCENT[2], ACCENT[3], 0.16)
     status.barGlow:SetPoint("TOPLEFT", status.barFrame, "TOPLEFT", 0, 3)
     status.barGlow:SetSize(1, 26)
-    status.bar = Tex(status, "OVERLAY", 0.95, 0.72, 0.1, 1)
+    status.bar = Tex(status, "OVERLAY", FILL[1], FILL[2], FILL[3], 1)
     status.bar:SetPoint("TOPLEFT", PAD + 1, -111)
     status.bar:SetSize(1, 18)
-    status.lead = Tex(status, "OVERLAY", 1, 0.97, 0.7, 1)       -- the bright leading edge
+    status.lead = Tex(status, "OVERLAY", 0.9, 0.99, 1, 1)       -- the bright leading edge
     status.lead:SetSize(3, 18)
     status.lead:SetPoint("TOPLEFT", PAD + 1, -111)
     status.barText = Text(status, "GameFontNormal", BONE)
     status.barText:SetPoint("TOPLEFT", PAD, -136)
     status.streak = Text(status, "GameFontHighlight", BONE)
     status.streak:SetPoint("TOPLEFT", PAD, -160)
+    status.pathBtn = Btn(status, "Path", 170, ACCENT)
+    status.pathBtn:SetPoint("TOPRIGHT", -PAD, -157)
+    status.pathBtn:SetScript("OnClick", function() UI.Track(true) end)
     status.statsHead, status.statsRule = Section(status, "Stats", -186)
     status.stats = Text(status, "GameFontHighlight", BONE)
     status.stats:SetPoint("TOPLEFT", PAD, -212)
@@ -437,8 +444,9 @@ local function BuildStatus()
     status:Hide()
 end
 
+-- the rank chip is an icy-blue frame; the tint deepens into brighter ice as the rank rises
 local RANK_COLORS = {
-    { 0.95, 0.5, 0.2 }, { 1, 0.85, 0.35 }, { 1, 0.45, 0.15 }, { 1, 0.3, 0.12 }, { 0.95, 0.25, 0.3 }, { 1, 0.95, 0.7 },
+    { 0.4, 0.65, 0.95 }, { 0.45, 0.8, 1 }, { 0.35, 0.9, 1 }, { 0.6, 0.95, 1 }, { 0.8, 0.97, 1 }, { 1, 1, 1 },
 }
 
 local function RefreshStatus()
@@ -447,12 +455,12 @@ local function RefreshStatus()
     local need = ns.XpForLevel(d.level)
     status.name:SetText(UnitName and UnitName("player") or "")
     status.level:SetText("Level " .. d.level)
-    local rc = RANK_COLORS[ns.RankIndex(d.level)] or GOLD
+    local rc = RANK_COLORS[ns.RankIndex(d.level)] or ACCENT
     status.rankColor = rc
     status.rank:SetText(ns.RankName(d.level))
-    status.rank:SetTextColor(rc[1], rc[2], rc[3])
+    status.rank:SetTextColor(ICE[1], ICE[2], ICE[3])
     status.chipBg:SetColorTexture(rc[1], rc[2], rc[3], 0.22)
-    for _, l in ipairs(status.chipLines) do l:SetColorTexture(rc[1], rc[2], rc[3], 0.95) end
+    for _, l in ipairs(status.chipLines) do l:SetColorTexture(ACCENT[1], ACCENT[2], ACCENT[3], 0.95) end
     local w = math.max(1, (BAR_W - 2) * d.xp / need)
     status.bar:SetWidth(w)
     status.barW = w
@@ -461,6 +469,8 @@ local function RefreshStatus()
     status.lead:SetPoint("TOPLEFT", PAD + 1 + math.max(0, w - 3), -111)
     status.barText:SetText(string.format("%d / %d XP   (%d%%)   -   %d to level", d.xp, need, math.floor(100 * d.xp / need), need - d.xp))
     status.streak:SetText("Daily streak: " .. d.streak .. (d.bestStreak > d.streak and ("   (best " .. d.bestStreak .. ")") or ""))
+    status.pathBtn.text:SetText("Path: " .. (d.track and ns.TRACK_NAMES[d.track] or "choose")
+        .. (d.pendingTrack and (" > " .. ns.TRACK_NAMES[d.pendingTrack]) or ""))
     local s = ns.Stats()
     status.stats:SetText(string.format("STR %d    AGI %d    VIT %d    INT %d    SEN %d", s.STR, s.AGI, s.VIT, s.INT, s.SEN))
     local names = {}
@@ -492,10 +502,10 @@ local function BuildDaily()
     daily:SetSize(STATUS_W, 260)
     daily:SetFrameStrata("MEDIUM")
     PlaceFrom(daily, "daily", { "CENTER", "CENTER", 300, 0 })
-    daily.sys = System(daily, GOLD)
+    daily.sys = System(daily, ACCENT)
     Movable(daily, "daily")
-    daily.title = Header(daily, "Daily Quests", GOLD)
-    daily.streak = Text(daily, "GameFontNormal", GOLD_HI)
+    daily.title = Header(daily, "Daily Quests", ACCENT)
+    daily.streak = Text(daily, "GameFontNormal", ICE)
     daily.streak:SetPoint("TOPLEFT", PAD, -52)
     daily.rows, daily.tracks, daily.fills = {}, {}, {}
     for i = 1, ns.DAILIES_PER_DAY do
@@ -508,7 +518,7 @@ local function BuildDaily()
         local tr = Tex(daily, "ARTWORK", 0, 0, 0, 0.8)
         tr:SetPoint("TOPLEFT", PAD, y - 20)
         tr:SetSize(BAR_W, 5)
-        local fi = Tex(daily, "OVERLAY", 0.95, 0.72, 0.1, 1)
+        local fi = Tex(daily, "OVERLAY", FILL[1], FILL[2], FILL[3], 1)
         fi:SetPoint("TOPLEFT", PAD, y - 20)
         fi:SetSize(1, 5)
         daily.tracks[i], daily.fills[i] = tr, fi
@@ -534,13 +544,14 @@ local function RefreshDaily()
     local d = ns.Data()
     local day = d.day
     daily.streak:SetText("Streak: " .. d.streak .. (d.bestStreak > d.streak and ("   (best " .. d.bestStreak .. ")") or "")
+        .. (d.track and ("   -   " .. ns.TRACK_NAMES[d.track]) or "")
         .. (day and day.allDone and "   -   today complete" or ""))
     local n = 0
     for i, fs in ipairs(daily.rows) do
         local q = day and day.quests[i]
         if q then
             n = n + 1
-            fs:SetText((q.done and "|cff73b84d[x]|r " or "[ ] ") .. q.text .. "   " .. q.progress .. "/" .. q.target)
+            fs:SetText((q.done and "|cff5fd7ff[x]|r " or "[ ] ") .. q.text .. "   " .. q.progress .. "/" .. q.target)
             fs:Show()
             daily.tracks[i]:Show()
             daily.fills[i]:SetWidth(math.max(1, BAR_W * (q.progress / math.max(1, q.target))))
@@ -569,6 +580,75 @@ function UI.ToggleDaily()
     RefreshDaily()
 end
 
+-- ------------------------------------------------------------ choose your path
+local trackWin
+local function BuildTrack()
+    if trackWin then return end
+    trackWin = CreateFrame("Frame", "ForgeChallengeTrack", UIParent)
+    trackWin:SetSize(440, 292)
+    trackWin:SetFrameStrata("DIALOG")
+    PlaceFrom(trackWin, "track", { "CENTER", "CENTER", 0, 60 })
+    trackWin.sys = System(trackWin, ACCENT)
+    Movable(trackWin, "track")
+    trackWin.title = Header(trackWin, "Choose your path", ACCENT)
+    trackWin.intro = Text(trackWin, "GameFontHighlightSmall", BONE_DIM)
+    trackWin.intro:SetPoint("TOPLEFT", PAD, -52)
+    trackWin.intro:SetWidth(408)
+    trackWin.intro:SetJustifyH("LEFT")
+    trackWin.rows = {}
+    for i, t in ipairs(ns.TRACKS) do
+        local b = CreateFrame("Button", nil, trackWin)
+        b:SetSize(408, 46)
+        b:SetPoint("TOPLEFT", PAD, -84 - (i - 1) * 54)
+        b.bg = Tex(b, "BACKGROUND", ACCENT[1] * 0.2, ACCENT[2] * 0.2, ACCENT[3] * 0.25, 0.9)
+        b.bg:SetAllPoints()
+        b.lines = { Line(b, "T", 0, 1, ACCENT, 0.8), Line(b, "B", 0, 1, ACCENT, 0.8), Line(b, "L", 0, 1, ACCENT, 0.8), Line(b, "R", 0, 1, ACCENT, 0.8) }
+        local hl = b:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(ACCENT[1], ACCENT[2], ACCENT[3], 0.18)
+        b.name = Text(b, "GameFontNormalLarge", ICE)
+        b.name:SetPoint("TOPLEFT", 12, -7)
+        b.name:SetText(ns.TRACK_NAMES[t])
+        b.blurb = Text(b, "GameFontHighlightSmall", BONE_DIM)
+        b.blurb:SetPoint("TOPLEFT", 12, -27)
+        b.blurb:SetText(ns.TRACK_BLURB[t])
+        b.mark = Text(b, "GameFontNormal", ACCENT)
+        b.mark:SetPoint("RIGHT", -12, 0)
+        b.track = t
+        b:SetScript("OnClick", function(self)
+            local r = ns.SetTrack(self.track)
+            if r == "now" then
+                trackWin:Hide(); UI.trackWanted = false
+            elseif r == "reset" then
+                trackWin.intro:SetText("Your path changes to " .. ns.TRACK_NAMES[self.track] .. " at the next daily reset. Today's dailies stay as they are.")
+            end
+            UI.Refresh()
+        end)
+        trackWin.rows[i] = b
+    end
+    trackWin.close = CreateFrame("Button", nil, trackWin, "UIPanelCloseButton")
+    trackWin.close:SetPoint("TOPRIGHT", 2, 2)
+    trackWin.close:SetScript("OnClick", function() trackWin:Hide(); UI.trackWanted = false end)
+    trackWin:Hide()
+    UI.trackFrame = trackWin
+end
+
+-- force = the player asked for it (shown even in combat); otherwise it waits out combat like a popup
+function UI.Track(force)
+    BuildTrack()
+    local d = ns.Data()
+    trackWin.title:SetText(d.track and "Your path" or "Choose your path")
+    trackWin.intro:SetText(d.track
+        and "Your daily quests are drawn from your path. A change applies at the next daily reset. All activity still earns Challenge XP on every path."
+        or "Pick the kind of challenge you want. Your daily quests are drawn from it. All activity still earns Challenge XP on every path, and you can change this later (it applies at the next daily reset).")
+    local cur = d.pendingTrack or d.track
+    for _, b in ipairs(trackWin.rows) do
+        b.mark:SetText(b.track == cur and (b.track == d.track and "current" or "at reset") or "")
+    end
+    UI.trackWanted = true
+    if force or not Held() then trackWin:Show() end
+end
+
 -- ------------------------------------------------------------ minimap button
 local mini
 local function Minimap_()
@@ -580,7 +660,7 @@ local function Minimap_()
         mini:SetFrameStrata("MEDIUM")
         mini:SetFrameLevel(8)
         local icon = mini:CreateTexture(nil, "BACKGROUND")
-        icon:SetTexture("Interface\\Icons\\Spell_Fire_Fire")
+        icon:SetTexture("Interface\\Icons\\Spell_Frost_FrostBolt02")
         icon:SetSize(20, 20)
         icon:SetPoint("CENTER")
         local border = mini:CreateTexture(nil, "OVERLAY")
@@ -626,6 +706,7 @@ function UI.Init()
     Minimap_()
     -- the Daily Quest window greets you at login while there is something left to do
     local d = ns.Data()
+    if d.track == nil and Settings().popups then UI.Track(false) end
     local open = false
     for _, q in ipairs(d.day and d.day.quests or {}) do if not q.done then open = true end end
     if open and Settings().popups then

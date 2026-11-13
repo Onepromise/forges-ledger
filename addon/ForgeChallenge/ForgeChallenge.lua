@@ -65,7 +65,7 @@ ns.DB = DB
 
 local COUNTERS = { "kills", "bosses", "dungeonBosses", "raidBosses", "heroicRaidBosses", "dungeons", "mplus",
                    "mplusTimed", "maxTimedKey", "quests", "worldQuests", "bgWins", "arenaWins", "deaths",
-                   "penaltiesDone", "dailiesDone", "daysCompleted" }
+                   "penaltiesDone", "dailiesDone", "daysCompleted", "pvpKills", "bgGames", "arenaGames" }
 
 local function Data()
     local db = DB()
@@ -96,7 +96,7 @@ local function Stamp()
     for _, q in ipairs(d.day and d.day.quests or {}) do total = total + 1; if q.done then done = done + 1 end end
     d.summary = { level = d.level, rank = rank, xp = d.xp, xpToNext = ns.XpForLevel(d.level),
                   streak = d.streak, dailiesDone = done, dailiesTotal = total,
-                  penalty = d.penalty and d.penalty.state or nil }
+                  penalty = d.penalty and d.penalty.state or nil, track = d.track, pendingTrack = d.pendingTrack }
 end
 ns.Stamp = Stamp
 
@@ -159,28 +159,83 @@ end
 
 local function RealLevel() return Plain(Try(UnitLevel, "player")) or 1 end
 
-local function PickDailies(idx)
-    local level, atMax = RealLevel(), IsMaxLevel()
-    local pool = {}
-    for _, t in ipairs(ns.DAILIES) do
-        if level >= t.minLevel and (not t.maxOnly or atMax) then pool[#pool + 1] = t end
+-- Can this client track the quest at all? Decided by what the client has, never by its version:
+-- every event in needs.events must have registered, every API in needs.apis must exist.
+ns.eventOK = ns.eventOK or {}
+local function Resolve(path)
+    local v = _G
+    for part in tostring(path):gmatch("[^%.]+") do
+        if type(v) ~= "table" then return nil end
+        v = v[part]
     end
+    return v
+end
+
+function ns.Available(t)
+    local n = t.needs
+    if not n then return true end
+    for _, e in ipairs(n.events or {}) do if ns.eventOK[e] == false then return false end end
+    for _, a in ipairs(n.apis or {}) do if Resolve(a) == nil then return false end end
+    return true
+end
+
+-- the templates of one pool that this character and client can do, in a rotation that changes daily
+local function PoolFor(list, pool, level, atMax, idx)
     local out = {}
-    local n = math.min(ns.DAILIES_PER_DAY, #pool)
-    local start = (#pool > n) and (idx % #pool) or 0     -- rotate so a max-level day is not always the same
-    for i = 0, n - 1 do
-        local t = pool[((start + i) % #pool) + 1]
-        out[#out + 1] = { id = t.id, counter = t.counter, text = string.format(t.text, t.target(level)),
-                          target = t.target(level), progress = 0, done = false }
+    for _, t in ipairs(list) do
+        if t.pool == pool and level >= t.minLevel and (not t.maxOnly or atMax) and ns.Available(t) then out[#out + 1] = t end
+    end
+    if #out > 1 then
+        local rotated, start = {}, idx % #out
+        for i = 0, #out - 1 do rotated[#rotated + 1] = out[((start + i) % #out) + 1] end
+        out = rotated
     end
     return out
 end
 
-local function PickPenalty()
-    local level = RealLevel()
-    for _, p in ipairs(ns.PENALTIES) do
-        if level >= p.minLevel then
-            return { id = p.id, counter = p.counter, text = string.format(p.text, p.target(level)),
+-- Draw up to `want` templates for a track. pve / pvp: that pool. mixed: alternate, starting with PvP on
+-- odd days, so both pools show up. An empty pool is simply skipped (the other one fills in).
+local function Draw(list, track, level, atMax, idx, want)
+    local pve = PoolFor(list, "pve", level, atMax, idx)
+    local pvp = PoolFor(list, "pvp", level, atMax, idx)
+    local chosen, a, b = {}, 1, 1
+    local function take(pool, i) if pool[i] then chosen[#chosen + 1] = pool[i]; return true end end
+    if track == "pvp" then
+        for i = 1, #pvp do if #chosen < want then take(pvp, i) end end
+    elseif track == "mixed" then
+        local first, second = pve, pvp
+        if idx % 2 == 1 then first, second = pvp, pve end
+        local ia, ib = 1, 1
+        while #chosen < want and (ia <= #first or ib <= #second) do
+            if ia <= #first then take(first, ia); ia = ia + 1 end
+            if #chosen < want and ib <= #second then take(second, ib); ib = ib + 1 end
+        end
+    else
+        for i = 1, #pve do if #chosen < want then take(pve, i) end end
+    end
+    return chosen
+end
+
+local function PickDailies(idx, track)
+    local level, atMax = RealLevel(), IsMaxLevel()
+    local out = {}
+    for _, t in ipairs(Draw(ns.DAILIES, track, level, atMax, idx, ns.DAILIES_PER_DAY)) do
+        out[#out + 1] = { id = t.id, pool = t.pool, counter = t.counter, text = string.format(t.text, t.target(level)),
+                          target = t.target(level), progress = 0, done = false }
+    end
+    -- never an empty day: if a track somehow has nothing this client can track, fall back to the PvE pool
+    if #out == 0 and track ~= "pve" then return PickDailies(idx, "pve") end
+    return out
+end
+
+-- a penalty from the same track pool as the missed day (for Mixed: the pool the first missed daily came from)
+local function PickPenalty(track, missed, idx)
+    local level, atMax = RealLevel(), IsMaxLevel()
+    local want = track
+    if track == "mixed" then want = (missed and missed.quests[1] and missed.quests[1].pool) or ((idx % 2 == 1) and "pvp" or "pve") end
+    for _, pool in ipairs({ want, "pve" }) do
+        for _, p in ipairs(PoolFor(ns.PENALTIES, pool, level, atMax, 0)) do
+            return { id = p.id, pool = p.pool, counter = p.counter, text = string.format(p.text, p.target(level)),
                      target = p.target(level), progress = 0 }
         end
     end
@@ -205,6 +260,11 @@ function ns.Rollover()
         elseif pen.state == "done" or pen.state == "declined" then d.penalty = nil end
     end
 
+    -- a path change picked mid-day takes effect now, at the reset (no mid-day dodging)
+    if d.pendingTrack then
+        d.track, d.pendingTrack = d.pendingTrack, nil
+    end
+
     local prev = d.day
     if prev then
         local gap = idx - prev.idx
@@ -212,7 +272,7 @@ function ns.Rollover()
             if not prev.allDone then
                 -- a penalty only exists to save a streak, so there must be one to save
                 if s.penalties and d.streak > 0 and not d.penalty then
-                    local p = PickPenalty()
+                    local p = PickPenalty(prev.track or d.track or "pve", prev, idx)
                     if p then
                         p.state, p.forIdx, p.untilIdx = "offered", prev.idx, idx
                         d.penalty = p
@@ -228,11 +288,38 @@ function ns.Rollover()
             d.penalty = nil
         end
     end
-    d.day = { idx = idx, quests = PickDailies(idx), allDone = false }
+    d.day = { idx = idx, track = d.track or "pve", quests = PickDailies(idx, d.track or "pve"), allDone = false }
     Stamp()
     UI("Refresh")
     if d.penalty and d.penalty.state == "offered" then UI("Penalty", d.penalty) end
     return true
+end
+
+-- Choose the path (PvE / PvP / Mixed). The first pick (no track yet) applies at once, and re-draws today's
+-- dailies if nothing has been done on them; any later change waits for the next daily reset.
+-- Returns "now", "reset", or nil for a bad track.
+function ns.SetTrack(track)
+    if track ~= "pve" and track ~= "pvp" and track ~= "mixed" then return nil end
+    local d = Data()
+    if d.track == nil then
+        d.track = track
+        local day = d.day
+        if day then
+            local untouched = true
+            for _, q in ipairs(day.quests) do if q.progress > 0 then untouched = false end end
+            if untouched then day.quests = PickDailies(day.idx, track); day.track = track end
+        end
+        Stamp(); UI("Refresh")
+        return "now"
+    end
+    if track == d.track then
+        d.pendingTrack = nil
+        Stamp(); UI("Refresh")
+        return "now"
+    end
+    d.pendingTrack = track
+    Stamp(); UI("Refresh")
+    return "reset"
 end
 
 function ns.AcceptPenalty()
@@ -342,6 +429,7 @@ function ns.OnEncounterEnd(encounterName, success)
         return
     end
     ns.GateBoss(encounterName)
+    ns.Counter("boss")
     ns.TitleCheck()
 end
 
@@ -383,10 +471,23 @@ function ns.OnQuest(questID)
     if wq then ns.Counter("worldquest") end
 end
 
+function ns.OnPvPGame(isArena)
+    -- a finished match counts as a game whoever won (it only feeds the PvP track's dailies; no XP of its own)
+    if isArena then Bump("arenaGames"); ns.Counter("arenagame")
+    else Bump("bgGames"); ns.Counter("bggame") end
+end
+
 function ns.OnPvPWin(isArena)
-    if isArena then Bump("arenaWins"); ns.AddXP(ns.XP_VALUES.arenaWin, "arena")
-    else Bump("bgWins"); ns.AddXP(ns.XP_VALUES.bgWin, "bg") end
+    if isArena then Bump("arenaWins"); ns.AddXP(ns.XP_VALUES.arenaWin, "arena"); ns.Counter("arenawin")
+    else Bump("bgWins"); ns.AddXP(ns.XP_VALUES.bgWin, "bg"); ns.Counter("bgwin") end
     ns.TitleCheck()
+end
+
+-- a hostile player dying under your target: counts for the PvP track's dailies and the kill counter.
+-- (The spec gives no XP for it, so it earns none.)
+function ns.OnPvPKill()
+    Bump("pvpKills")
+    ns.Counter("pvpkill")
 end
 
 function ns.OnRealLevelUp()
@@ -444,8 +545,9 @@ local seen = {}          -- guid -> time credited
 local function TargetDied()
     if not Plain(Try(UnitExists, "target")) then return end
     if not Plain(Try(UnitIsDead, "target")) then return end
-    if Plain(Try(UnitIsPlayer, "target")) then return end
-    if Plain(Try(UnitIsTapDenied, "target")) then return end
+    local isPlayer = Plain(Try(UnitIsPlayer, "target"))
+    if isPlayer and not Plain(Try(UnitCanAttack, "player", "target")) then return end   -- a friendly player
+    if not isPlayer and Plain(Try(UnitIsTapDenied, "target")) then return end
     local guid = Plain(Try(UnitGUID, "target"))
     if type(guid) ~= "string" then return end
     local t = time()
@@ -453,6 +555,7 @@ local function TargetDied()
     seen[guid] = t
     local n = 0
     for g, ts in pairs(seen) do n = n + 1; if t - ts > 600 then seen[g] = nil end end
+    if isPlayer then ns.OnPvPKill(); return end
     ns.OnKill(Plain(Try(UnitClassification, "target")))
 end
 
@@ -463,7 +566,7 @@ local E = {
     "UNIT_HEALTH", "ENCOUNTER_END", "CHALLENGE_MODE_COMPLETED", "QUEST_TURNED_IN", "PVP_MATCH_COMPLETE",
     "PLAYER_LEVEL_UP", "PLAYER_DEAD", "LFG_COMPLETION_REWARD", "SCENARIO_COMPLETED", "PLAYER_REGEN_ENABLED",
 }
-for _, e in ipairs(E) do pcall(frame.RegisterEvent, frame, e) end   -- in case a client lacks one
+for _, e in ipairs(E) do ns.eventOK[e] = pcall(frame.RegisterEvent, frame, e) and true or false end   -- in case a client lacks one
 
 local acc = 0
 frame:SetScript("OnEvent", function(_, event, a, b, c, d4, e5)
@@ -501,8 +604,10 @@ frame:SetScript("OnEvent", function(_, event, a, b, c, d4, e5)
         -- credited only when the winner and the player's side can both be read and agree
         local winner = Plain(a)
         local mine = Plain(Try(GetBattlefieldArenaFaction))
+        local arena = Plain(Try(C_PvP and C_PvP.IsArena)) and true or false
+        pcall(ns.OnPvPGame, arena)
         if type(winner) == "number" and type(mine) == "number" and winner == mine then
-            pcall(ns.OnPvPWin, Plain(Try(C_PvP and C_PvP.IsArena)) and true or false)
+            pcall(ns.OnPvPWin, arena)
         end
     elseif event == "PLAYER_LEVEL_UP" then
         pcall(ns.OnRealLevelUp)
@@ -539,6 +644,20 @@ SlashCmdList["FORGECHALLENGE"] = function(msg)
         elseif d.penalty and d.penalty.state == "active" then
             print(PREFIX .. "Penalty: " .. d.penalty.text .. " (" .. d.penalty.progress .. "/" .. d.penalty.target .. ")")
         else print(PREFIX .. "No penalty right now.") end
+    elseif cmd == "track" or cmd == "path" then
+        if rest == "" then
+            local d = Data()
+            print(PREFIX .. "Your path: " .. (d.track and ns.TRACK_NAMES[d.track] or "not chosen yet")
+                .. (d.pendingTrack and (" (changing to " .. ns.TRACK_NAMES[d.pendingTrack] .. " at the next daily reset)") or "")
+                .. ". /fc track pve | pvp | mixed")
+            if not d.track then UI("Track") end
+        else
+            local r = ns.SetTrack(rest)
+            if r == "now" then print(PREFIX .. "Path set to " .. ns.TRACK_NAMES[rest] .. ".")
+            elseif r == "reset" then print(PREFIX .. "Path changes to " .. ns.TRACK_NAMES[rest] .. " at the next daily reset. Today's dailies stay as they are.")
+            else print(PREFIX .. "Choose pve, pvp or mixed.") end
+        end
+    elseif cmd == "settings" then UI("Track")
     elseif cmd == "penalties" then flag("penalties", "Penalty quests", rest)
     elseif cmd == "combat" then flag("hideInCombat", "Hide popups in combat", rest)
     elseif cmd == "popups" then flag("popups", "Popups", rest)
@@ -563,6 +682,7 @@ SlashCmdList["FORGECHALLENGE"] = function(msg)
     else
         print(PREFIX .. "v" .. VERSION .. (IsForever() and " (WoW Forever: preview, numbers not verified on this client)" or "") .. " commands:")
         print("  /fc - Status window; /fc daily - Daily Quests; /fc penalty - the current penalty; /fc xp")
+        print("  /fc track [pve|pvp|mixed] - choose your path (a change applies at the next daily reset); /fc settings opens the picker")
         print("  /fc penalties|combat|popups|sound|minimap on|off - settings (combat = hide popups in combat)")
         print("  /fc values - the XP values; /fc reset - start this character over")
     end

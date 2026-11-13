@@ -57,29 +57,59 @@ ns.TITLES = {
 
 -- Daily quest templates (spec 7). counter = which tracked event advances it.
 -- target(level) gives the amount; minLevel / maxOnly decide who can be given it.
+-- pool = which track it belongs to ("pve" or "pvp"); `needs` lists what the client must have for the
+-- quest to be trackable at all -- events that must have registered and APIs that must exist -- so a
+-- daily a client cannot track never enters its pool (decided by the client, never guessed by version).
 local function tier(level, a, b, c, d) if level < 20 then return a elseif level < 40 then return b elseif level < 60 then return c end return d end
+ns.TRACKS = { "pve", "pvp", "mixed" }
+ns.TRACK_NAMES = { pve = "PvE", pvp = "PvP", mixed = "Mixed" }
+ns.TRACK_BLURB = {
+    pve = "Kills, dungeons, bosses, quests.",
+    pvp = "Battlegrounds, arenas, player kills.",
+    mixed = "A blend of both.",
+}
 ns.DAILIES = {
-    { id = "kills", counter = "kill", minLevel = 1, text = "Slay %d enemies",
+    -- PvE pool
+    { id = "kills", pool = "pve", counter = "kill", minLevel = 1, text = "Slay %d enemies",
       target = function(l) return tier(l, 10, 25, 40, 60) end },
-    { id = "quests", counter = "quest", minLevel = 1, text = "Turn in %d quests",
+    { id = "quests", pool = "pve", counter = "quest", minLevel = 1, text = "Turn in %d quests",
       target = function(l) return tier(l, 2, 3, 4, 5) end },
-    { id = "dungeon", counter = "dungeon", minLevel = 10, text = "Complete %d dungeons",
+    { id = "dungeon", pool = "pve", counter = "dungeon", minLevel = 10, text = "Complete %d dungeons",
       target = function(l) return 2 end },
-    { id = "mplus", counter = "mplus", minLevel = 1, maxOnly = true, text = "Complete %d Mythic+ dungeon",
-      target = function(l) return 1 end },
-    { id = "worldquest", counter = "worldquest", minLevel = 1, maxOnly = true, text = "Complete %d world quests",
-      target = function(l) return 4 end },
-    src = "chosen: spec 7 gives only two examples (level 20: 2 dungeons; max level: 1 M+ and 4 world quests); the rest are picked for v1",
+    { id = "bosses", pool = "pve", counter = "boss", minLevel = 10, text = "Defeat %d dungeon or raid bosses",
+      target = function(l) return 3 end, needs = { events = { "ENCOUNTER_END" } } },
+    { id = "mplus", pool = "pve", counter = "mplus", minLevel = 1, maxOnly = true, text = "Complete %d Mythic+ dungeon",
+      target = function(l) return 1 end, needs = { events = { "CHALLENGE_MODE_COMPLETED" } } },
+    { id = "worldquest", pool = "pve", counter = "worldquest", minLevel = 1, maxOnly = true, text = "Complete %d world quests",
+      target = function(l) return 4 end, needs = { apis = { "C_QuestLog.IsWorldQuest" } } },
+    -- PvP pool (a battleground / arena result comes from PVP_MATCH_COMPLETE; an arena also needs C_PvP.IsArena
+    -- to tell it from a battleground; player kills come from the target observer and need nothing)
+    { id = "bgwin", pool = "pvp", counter = "bgwin", minLevel = 10, text = "Win %d battleground",
+      target = function(l) return 1 end, needs = { events = { "PVP_MATCH_COMPLETE" } } },
+    { id = "bggame", pool = "pvp", counter = "bggame", minLevel = 10, text = "Finish %d battlegrounds",
+      target = function(l) return 2 end, needs = { events = { "PVP_MATCH_COMPLETE" } } },
+    { id = "arenawin", pool = "pvp", counter = "arenawin", minLevel = 10, text = "Win %d arena match",
+      target = function(l) return 1 end, needs = { events = { "PVP_MATCH_COMPLETE" }, apis = { "C_PvP.IsArena" } } },
+    { id = "arenagame", pool = "pvp", counter = "arenagame", minLevel = 10, text = "Finish %d arena matches",
+      target = function(l) return 2 end, needs = { events = { "PVP_MATCH_COMPLETE" }, apis = { "C_PvP.IsArena" } } },
+    { id = "pvpkill", pool = "pvp", counter = "pvpkill", minLevel = 1, text = "Defeat %d enemy players",
+      target = function(l) return tier(l, 5, 10, 15, 20) end },
+    src = "chosen: spec 7 gives only two examples (level 20: 2 dungeons; max level: 1 M+ and 4 world quests); the rest, and every PvP quest, are picked for v1",
 }
 ns.DAILIES_PER_DAY = 3
 
--- Gentle penalty objectives (Forge's ruling: in-game extra objectives, auto-tracked).
+-- Gentle penalty objectives (Forge's ruling: in-game extra objectives, auto-tracked). A penalty is drawn
+-- from the SAME pool as the daily that was missed.
 ns.PENALTIES = {
-    { id = "dungeons", counter = "dungeon", minLevel = 10, text = "Complete %d extra dungeons before the next reset",
+    { id = "dungeons", pool = "pve", counter = "dungeon", minLevel = 10, text = "Complete %d extra dungeons before the next reset",
       target = function(l) return 2 end },
-    { id = "kills", counter = "kill", minLevel = 1, text = "Slay %d extra enemies before the next reset",
+    { id = "kills", pool = "pve", counter = "kill", minLevel = 1, text = "Slay %d extra enemies before the next reset",
       target = function(l) return 25 end },
-    src = "spec 7 example: 2 extra dungeons; the kills fallback for characters under level 10: chosen",
+    { id = "bggames", pool = "pvp", counter = "bggame", minLevel = 10, text = "Finish %d extra battlegrounds before the next reset",
+      target = function(l) return 2 end, needs = { events = { "PVP_MATCH_COMPLETE" } } },
+    { id = "pvpkills", pool = "pvp", counter = "pvpkill", minLevel = 1, text = "Defeat %d extra enemy players before the next reset",
+      target = function(l) return 10 end },
+    src = "spec 7 example: 2 extra dungeons; the rest are chosen",
 }
 
 -- Gate ranks (spec 9). Mythic+ key levels: <10 B, 10-14 A, 15+ S (spec says "B/A/S by key level": thresholds chosen).
