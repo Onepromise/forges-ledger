@@ -2,7 +2,7 @@
 ## Title: Forge's Ledger: Kill Ledger
 ## Notes: How many of each mob you have killed, what they drop, how often, and what it all sells for to a vendor. Optional companion to Forge's Ledger; your numbers also show on the Ledger dashboard. Type /kl to open it.
 ## Author: Forge at Crescent Cove
-## Version: 1.1
+## Version: 1.2
 ## X-Website: https://thecrescentcove.com/forge-ledger
 ## X-Curse-Project-ID: 1758161
 ## OptionalDeps: ForgesLedger

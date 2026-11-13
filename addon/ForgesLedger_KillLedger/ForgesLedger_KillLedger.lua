@@ -38,7 +38,7 @@
 --   kill, and its stack size adds to the quantity. Slots locked for a group
 --   roll are skipped.
 
-local VERSION = "1.1"
+local VERSION = "1.2"
 local SCHEMA = 1
 local PREFIX = "|cffFFD700[Kill Ledger]|r "
 local KILL_TTL = 600        -- a corpse's loot is attributed for 10 minutes
@@ -198,6 +198,7 @@ local function MobName(guid)
 end
 
 local panel, Render  -- the panel code below
+local hosted = false  -- true when the panel lives as a tab in the Ledger's main window
 
 -- Credit one kill. `name` may be nil (the loot window knows the name better).
 local function CreditKill(guid, name, via)
@@ -856,37 +857,45 @@ end
 
 local function HideTooltip() pcall(function() GameTooltip:Hide() end) end
 
-local function CreatePanel()
+-- host: the main Ledger window's body when the panel is a tab there (then the window gives it the
+-- frame, the title, the close button, dragging and Escape); nil = the standalone window.
+local function CreatePanel(host)
     local ui = UI()
     if ui.scope == "lifetime" or ui.scope == "session" then scope = ui.scope end
     if ui.sort == "recent" or ui.sort == "kills" then sortMode = ui.sort end
-    panel = CreateFrame("Frame", "ForgesLedgerKillLedgerPanel", UIParent)
+    panel = CreateFrame("Frame", "ForgesLedgerKillLedgerPanel", host or UIParent)
     panel:SetSize(W, H)
-    panel:SetFrameStrata("HIGH")
-    panel:SetToplevel(true)
-    panel:SetClampedToScreen(true)
-    panel:EnableMouse(true)
-    panel:SetMovable(true)
-    panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", panel.StartMoving)
-    panel:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        local point, _, rel, x, y = self:GetPoint()
-        ForgesLedgerKillLedgerDB.panelPos = { point, rel, x, y }
-    end)
-    Tex(panel, "BACKGROUND", IRON[1], IRON[2], IRON[3], IRON[4]):SetAllPoints()
-    Border(panel, 0.85)
-    local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
-    -- hide the frame directly: the template's own click goes through Blizzard's
-    -- panel manager, which can refuse in combat (the window then won't close)
-    close:SetScript("OnClick", function() panel:Hide() end)
-    close:SetPoint("TOPRIGHT", 2, 2)
-    panel.close = close
-    local pos = ForgesLedgerKillLedgerDB.panelPos
-    if type(pos) == "table" and type(pos[1]) == "string" then
-        panel:SetPoint(pos[1], UIParent, pos[2] or pos[1], tonumber(pos[3]) or 0, tonumber(pos[4]) or 0)
+    if host then
+        panel:EnableMouse(false)   -- clicks on empty space fall through, so the window can still be dragged
     else
-        panel:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+        panel:SetFrameStrata("HIGH")
+        panel:SetToplevel(true)
+        panel:SetClampedToScreen(true)
+        panel:EnableMouse(true)
+        panel:SetMovable(true)
+        panel:RegisterForDrag("LeftButton")
+        panel:SetScript("OnDragStart", panel.StartMoving)
+        panel:SetScript("OnDragStop", function(self)
+            self:StopMovingOrSizing()
+            local point, _, rel, x, y = self:GetPoint()
+            ForgesLedgerKillLedgerDB.panelPos = { point, rel, x, y }
+        end)
+    end
+    Tex(panel, "BACKGROUND", IRON[1], IRON[2], IRON[3], IRON[4]):SetAllPoints()
+    if not host then
+        Border(panel, 0.85)
+        local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
+        -- hide the frame directly: the template's own click goes through Blizzard's
+        -- panel manager, which can refuse in combat (the window then won't close)
+        close:SetScript("OnClick", function() panel:Hide() end)
+        close:SetPoint("TOPRIGHT", 2, 2)
+        panel.close = close
+        local pos = ForgesLedgerKillLedgerDB.panelPos
+        if type(pos) == "table" and type(pos[1]) == "string" then
+            panel:SetPoint(pos[1], UIParent, pos[2] or pos[1], tonumber(pos[3]) or 0, tonumber(pos[4]) or 0)
+        else
+            panel:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+        end
     end
     panel.mobUI, panel.wishUI = {}, {}
 
@@ -1235,11 +1244,16 @@ local function CreatePanel()
         if acc >= 1 then acc = 0; UpdateStrip() end
     end)
     panel.rows, panel.irows, panel.wrows, panel.mrows, panel.srows = rows, irows, wrows, mrows, srows   -- (the tests look at the rows)
-    tinsert(UISpecialFrames, "ForgesLedgerKillLedgerPanel")
+    if not host then tinsert(UISpecialFrames, "ForgesLedgerKillLedgerPanel") end
     panel:Hide()
 end
 
+-- Open the panel: as a tab in the main Ledger window when this core has tabs, else the standalone window.
 local function ShowPanel()
+    if hosted then
+        ForgesLedger.OpenTab("killledger", false)
+        return
+    end
     if not panel then CreatePanel() end
     FillPrices()
     panel:Show()
@@ -1247,7 +1261,28 @@ local function ShowPanel()
 end
 
 local function TogglePanel()
-    if panel and panel:IsShown() then panel:Hide() else ShowPanel() end
+    if hosted then
+        ForgesLedger.OpenTab("killledger", true)
+    elseif panel and panel:IsShown() then
+        panel:Hide()
+    else
+        ShowPanel()
+    end
+end
+
+-- A core with tabs (ForgesLedger.RegisterTab) gets the whole panel as a "Kill Ledger" tab; an older
+-- core, or none, keeps the standalone window.
+local function RegisterTab()
+    if not (ForgesLedger and ForgesLedger.RegisterTab and ForgesLedger.OpenTab) then return end
+    local ok = ForgesLedger.RegisterTab({
+        id = "killledger", label = "Kill Ledger", order = 10, width = W, height = H,
+        panel = function(parent)
+            if not panel then CreatePanel(parent) end
+            return panel
+        end,
+        onShow = function() FillPrices(); Render() end,
+    })
+    hosted = ok and true or false
 end
 
 ------------------------------------------------------------------- toasts ---
@@ -1481,6 +1516,7 @@ frame:SetScript("OnEvent", function(_, event, a, b)
         Touch()
     elseif event == "PLAYER_LOGIN" then
         Touch()
+        pcall(RegisterTab)
         HookDropTooltip()
         C_Timer.After(5, function() pcall(FillPrices) end)
     end

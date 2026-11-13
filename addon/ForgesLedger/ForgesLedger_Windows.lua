@@ -1,4 +1,4 @@
--- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.14)
+-- Forge's Ledger: detail windows and hover cards (part of the core addon, v2.15)
 -- One builder makes every window the bar opens - the main Ledger window,
 -- each segment's details, settings - so they all look and behave the same:
 -- a title you can drag, a close button, and a scrolling list of lines.
@@ -159,7 +159,7 @@ local function Render(f)
     local n = #lines
     local overflow = n > MAX_VISIBLE
     f.content:SetHeight(math.max(1, n * ROW_H))
-    f:SetHeight(44 + math.min(n, MAX_VISIBLE) * ROW_H)
+    f:SetHeight((f.topOffset or 32) + 12 + math.min(n, MAX_VISIBLE) * ROW_H)
     f.scroll:SetPoint("BOTTOMRIGHT", overflow and -30 or -10, 10)
     if f.scrollBar then f.scrollBar:SetShown(overflow) end
     if not overflow then f.scroll:SetVerticalScroll(0) end
@@ -208,6 +208,11 @@ local function Create(id)
     sf:SetScrollChild(content)
     f.scroll, f.content, f.rows = sf, content, {}
     f.scrollBar = sf.ScrollBar or _G[name .. "ScrollScrollBar"]
+    f.topOffset = 32
+    f.body = CreateFrame("Frame", nil, f)   -- where a panel tab's own frame lives
+    f.body:SetPoint("TOPLEFT", 6, -32)
+    f.body:SetPoint("BOTTOMRIGHT", -6, 6)
+    f.body:Hide()
 
     tinsert(UISpecialFrames, name)  -- Escape closes it, like the game's own windows
     f:Hide()
@@ -249,6 +254,177 @@ function W.RefreshAll()
     for _, f in pairs(windows) do
         if f:IsShown() and f.build then Render(f) end
     end
+end
+
+------------------------------------------------------------- main window tabs ---
+-- The main Ledger window ("ledger") can hold several tabs. The first is always the home tab
+-- (the Ledger's own summary). Any addon can add one with ForgesLedger.RegisterTab:
+--   { id = "killledger", label = "Kill Ledger", order = 10,
+--     -- EITHER a list-of-lines tab ...
+--     build = function() return { { text = "...", ... } } end,
+--     -- ... OR a panel tab: its own frame, built into the body the window gives it
+--     panel = function(parent) return frame end,   -- called once; the frame is parented and placed for you
+--     width = 940, height = 540,                    -- the panel's natural size: the window resizes to it
+--     onShow = function() end }                     -- each time the tab is selected
+-- With only the home tab registered, no tab row is drawn and the window looks as it always did.
+-- Everything is pcall'd: a tab that errors shows a message instead of breaking the window.
+local tabs = {}
+local TAB_ROW = 26
+local HOST = "ledger"
+
+local function SortedTabs()
+    local list = {}
+    for _, t in pairs(tabs) do tinsert(list, t) end
+    table.sort(list, function(a, b)
+        if a.order ~= b.order then return a.order < b.order end
+        return a.id < b.id
+    end)
+    return list
+end
+
+local function SavedTab()
+    local ui = ForgeGoldDB and ForgeGoldDB.ui
+    return type(ui) == "table" and ui.tab or nil
+end
+
+local function SaveTab(id)
+    if not ForgeGoldDB then return end
+    ForgeGoldDB.ui = type(ForgeGoldDB.ui) == "table" and ForgeGoldDB.ui or {}
+    ForgeGoldDB.ui.tab = id
+end
+
+-- register / replace a tab. spec may be just a lines-builder function.
+function W.RegisterTab(id, label, spec)
+    if type(id) ~= "string" or id == "" then return false end
+    if type(spec) == "function" then spec = { build = spec } end
+    if type(spec) ~= "table" or (not spec.build and not spec.panel) then return false end
+    local old = tabs[id]
+    tabs[id] = { id = id, label = tostring(label or id), order = tonumber(spec.order) or (id == "home" and 0 or 100),
+                 build = spec.build, panel = spec.panel, width = tonumber(spec.width), height = tonumber(spec.height),
+                 onShow = spec.onShow, child = old and old.child or nil }
+    local f = windows[HOST]
+    if f then W.LayoutTabs(f) end
+    return true
+end
+
+function W.TabIds()
+    local out = {}
+    for _, t in ipairs(SortedTabs()) do out[#out + 1] = t.id end
+    return out
+end
+
+function W.ActiveTab()
+    local f = windows[HOST]
+    return f and f.activeTab or nil
+end
+
+-- (re)build the tab row for the number of tabs there are now
+function W.LayoutTabs(f)
+    local list = SortedTabs()
+    local show = #list > 1
+    f.topOffset = show and (32 + TAB_ROW) or 32
+    f.tabButtons = f.tabButtons or {}
+    local x = 10
+    for i, t in ipairs(list) do
+        local b = f.tabButtons[i]
+        if not b then
+            b = CreateFrame("Button", nil, f)
+            b:SetHeight(22)
+            b.bg = b:CreateTexture(nil, "BACKGROUND")
+            b.bg:SetAllPoints()
+            b.label = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            b.label:SetPoint("CENTER")
+            f.tabButtons[i] = b
+        end
+        b.tabId = t.id
+        b.label:SetText(t.label)
+        b:SetWidth(math.max(60, 22 + #t.label * 7))
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", f, "TOPLEFT", x, -30)
+        x = x + b:GetWidth() + 4
+        b:SetScript("OnClick", function() W.SelectTab(t.id) end)
+        local active = (f.activeTab == t.id)
+        b.bg:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], active and 0.25 or 0.07)
+        b.active = active
+        b:SetShown(show)
+    end
+    for i = #list + 1, #f.tabButtons do f.tabButtons[i]:Hide() end
+    f.scroll:ClearAllPoints()
+    f.scroll:SetPoint("TOPLEFT", 10, -f.topOffset)
+    f.scroll:SetPoint("BOTTOMRIGHT", -30, 10)
+    f.body:ClearAllPoints()
+    f.body:SetPoint("TOPLEFT", 6, -f.topOffset)
+    f.body:SetPoint("BOTTOMRIGHT", -6, 6)
+end
+
+-- show tab `id` in the main window (the window must exist)
+function W.SelectTab(id)
+    local f = windows[HOST]
+    local t = tabs[id]
+    if not f or not t then return false end
+    f.activeTab = id
+    SaveTab(id)
+    W.LayoutTabs(f)
+    -- panel frames of the tabs that are not selected step aside
+    for _, o in pairs(tabs) do
+        if o.child and o.id ~= id then o.child:Hide() end
+    end
+    if t.panel then
+        f.scroll:Hide()
+        if f.scrollBar then f.scrollBar:Hide() end
+        f.build = nil
+        if not t.child then
+            local ok, child = pcall(t.panel, f.body)
+            if ok and type(child) == "table" then
+                t.child = child
+                child:SetParent(f.body)
+                child:ClearAllPoints()
+                child:SetPoint("TOPLEFT", f.body, "TOPLEFT", 0, 0)
+            else
+                t.failed = tostring(child)
+            end
+        end
+        f.body:Show()
+        if t.child then
+            t.child:Show()
+            f:SetSize((t.width or 600) + 12, (t.height or 400) + f.topOffset + 6)
+            if t.onShow then
+                local ok, err = pcall(t.onShow)
+                if not ok then print(ns.PREFIX .. tostring(err)) end
+            end
+        else
+            -- the panel could not be built: say so in a plain lines tab
+            f.body:Hide()
+            f.scroll:Show()
+            f:SetWidth(WIDTH)
+            f.build = function() return { { text = "This tab couldn't load: " .. tostring(t.failed), dim = true } } end
+            Render(f)
+        end
+    else
+        f.body:Hide()
+        f.scroll:Show()
+        f:SetWidth(WIDTH)
+        f.build = t.build
+        Render(f)
+    end
+    return true
+end
+
+-- Open the main window (on `tab`, else on the tab last used, else home). toggle: close it if it
+-- is already open on that tab. Returns true if the window is now open.
+function W.OpenMain(title, tab, toggle)
+    local f = windows[HOST] or Create(HOST)
+    local want = tab or SavedTab() or "home"
+    if not tabs[want] then want = "home" end
+    if toggle and f:IsShown() and (not tab or f.activeTab == tab) then
+        f:Hide()
+        return false
+    end
+    f.title:SetText(title or "Forge's Ledger")
+    W.SelectTab(want)
+    f:Show()
+    f:Raise()
+    return true
 end
 
 ------------------------------------------------------- roster tooltips ---

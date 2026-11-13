@@ -188,9 +188,22 @@ local SettingsLines
 -- Open a segment's window (toggle = close it if it's open). Also used by
 -- /fl, so every window works with the bar hidden. Returns nil if there's
 -- no such window (e.g. a satellite that isn't installed).
+W.RegisterTab("home", "Ledger", function() return MainLines() end)
+
+-- Satellites add tabs to the main window; ForgesLedger.OpenTab opens it on one.
+ForgesLedger.RegisterTab = function(spec)
+    if type(spec) ~= "table" then return false end
+    local ok, res = pcall(W.RegisterTab, spec.id, spec.label, spec)
+    return ok and res or false
+end
+ForgesLedger.OpenTab = function(id, toggle)
+    local ok, res = pcall(W.OpenMain, "Forge's Ledger", id, toggle)
+    return ok and res or false
+end
+
 function ns.OpenWindow(id, toggle)
     local open = toggle and W.Toggle or W.Open
-    if id == "ledger" then return open("ledger", "Forge's Ledger", MainLines) end
+    if id == "ledger" then return W.OpenMain("Forge's Ledger", nil, toggle) end
     if id == "settings" then return open("settings", "Forge's Ledger - Settings", SettingsLines) end
     local p = plugins[id]
     if p and p.open then  -- the plugin draws its own window

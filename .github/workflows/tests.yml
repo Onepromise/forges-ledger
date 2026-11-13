@@ -27,3 +27,5 @@ jobs:
         run: python tests/lua/kl_run.py addon
       - name: Addon tests (XP bar)
         run: python tests/lua/xp_run.py addon
+      - name: Addon tests (main window tabs)
+        run: python tests/lua/tabs_run.py addon
