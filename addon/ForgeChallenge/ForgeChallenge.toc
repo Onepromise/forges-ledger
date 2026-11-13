@@ -1,0 +1,9 @@
+## Interface: 120000, 120100, 120105, 16001
+## Title: Forge's Challenge
+## Notes: A game within the game: Challenge XP, levels, ranks, daily quests and gentle penalties, earned automatically from what you actually do. Cosmetic only. /fc
+## Author: Forge at Crescent Cove
+## Version: 0.1-WIP
+## SavedVariables: ForgeChallengeDB
+ForgeChallenge_Data.lua
+ForgeChallenge.lua
+ForgeChallenge_UI.lua

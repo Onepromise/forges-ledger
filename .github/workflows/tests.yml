@@ -27,3 +27,5 @@ jobs:
         run: python tests/lua/kl_run.py addon
       - name: Addon tests (XP bar)
         run: python tests/lua/xp_run.py addon
+      - name: Addon tests (Forge's Challenge)
+        run: python tests/lua/fc_run.py addon
