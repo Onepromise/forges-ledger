@@ -539,6 +539,19 @@ check("per hour is value / hours", abs(pace["perHour"] - 1000) <= 2, pace["perHo
 R = run("Kill Ledger: WoW Forever", before="WOW_PROJECT_ID, WOW_PROJECT_MAINLINE = 2, 1")
 check("it works on Forever and says so in the save file", R.eval("ForgesLedgerKillLedgerDB.version") == "Forever")
 
+R = run("Kill Ledger: combat-log mode refused where the function is missing", before="WOW_PROJECT_ID, WOW_PROJECT_MAINLINE = 2, 1; CombatLogGetCurrentEventInfo = nil", cl=False)
+slash(R, "combatlog on")
+msg = " ".join(R.eval("PRINTED").values())
+check("/kl combatlog on refuses with a plain line and says what runs instead", "not available" in msg and "default counter" in msg, msg)
+check("...and nothing was switched on", R.eval("ForgesLedgerKillLedgerDB.combatLog") is False)
+R = run("Kill Ledger: a saved combat-log opt-in is ignored there", before="WOW_PROJECT_ID, WOW_PROJECT_MAINLINE = 2, 1; CombatLogGetCurrentEventInfo = nil")
+check("the mode falls back to the default counter, no combat-log registration", R.eval("ForgesLedgerKillLedgerDB.countMode") == "observed" and not R.eval("CLEU_REGISTERED()"), R.eval("ForgesLedgerKillLedgerDB.countMode"))
+slash(R, "")
+check("the footer does not claim the combat log", "combat log" not in R.eval("%s.foot:GetText()" % P).lower() or "target dies" in R.eval("%s.foot:GetText()" % P), R.eval("%s.foot:GetText()" % P))
+R = run("Kill Ledger: retail keeps the combat-log mode")
+slash(R, "combatlog on")
+check("on retail it switches on as before", R.eval("ForgesLedgerKillLedgerDB.combatLog") is True and "ON" in " ".join(R.eval("PRINTED").values()))
+
 # ---------------------------------------------------------------- item search ---
 R = run("Kill Ledger UI: item search ranked by drop chance")
 # Boar 1/4 = 25%, Wolf 2/4 = 50%, Cat 1/2 = 50% (tie with Wolf, fewer kills), Bear 1/1 = 100%

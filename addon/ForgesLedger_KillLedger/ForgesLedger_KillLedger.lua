@@ -1370,7 +1370,10 @@ frame:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 -- The combat log is opt-in (see the header): registering for it is what
 -- trips the blocked-action dialog on clients that restrict it.
 local cleuOK = false
-if ForgesLedgerKillLedgerDB.combatLog == true then
+-- The combat-log counter reads every event through CombatLogGetCurrentEventInfo. Some clients
+-- (WoW Forever, 16001) do not have it, so the mode could record nothing there: refuse it.
+local function CombatLogAvailable() return type(CombatLogGetCurrentEventInfo) == "function" end
+if ForgesLedgerKillLedgerDB.combatLog == true and CombatLogAvailable() then
     cleuOK = pcall(frame.RegisterEvent, frame, "COMBAT_LOG_EVENT_UNFILTERED")
 end
 ForgesLedgerKillLedgerDB.countMode = cleuOK and "combatlog" or "observed"
@@ -1523,6 +1526,10 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         if cmd ~= "tooltip" then ForgesLedgerKillLedgerDB.tooltip = (cmd == "tooltip on") end
         print(PREFIX .. "Enemy tooltip lines are " .. (ForgesLedgerKillLedgerDB.tooltip == false and "OFF" or "ON")
             .. ". /kl tooltip on|off")
+    elseif cmd == "combatlog on" and not CombatLogAvailable() then
+        ForgesLedgerKillLedgerDB.combatLog = false
+        print(PREFIX .. "Combat-log counting is not available on this version of the game, so it stays off. "
+            .. "The default counter (your target's death and the loot window) is what runs.")
     elseif cmd == "combatlog on" or cmd == "combatlog off" then
         ForgesLedgerKillLedgerDB.combatLog = (cmd == "combatlog on")
         print(PREFIX .. "Combat-log counting " .. (cmd == "combatlog on" and "ON" or "OFF") .. " after /reload."
