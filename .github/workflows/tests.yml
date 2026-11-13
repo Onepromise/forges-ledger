@@ -23,3 +23,5 @@ jobs:
         run: python tests/lua/chron_run.py addon
       - name: Addon tests (PUG Lyfe)
         run: python tests/lua/pug_run.py addon
+      - name: Addon tests (Kill Ledger)
+        run: python tests/lua/kl_run.py addon

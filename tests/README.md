@@ -9,6 +9,7 @@ real data.
 | `python tests/lua/run.py addon` | Forge's Ledger (core bar and windows), Professions and Dungeons, driven in a mock WoW client |
 | `python tests/lua/chron_run.py addon` | Forge's Chronicle, the same way |
 | `python tests/lua/pug_run.py addon` | PUG Lyfe, with a fake party/raid API |
+| `python tests/lua/kl_run.py addon` | Kill Ledger, with a fake combat log and loot window |
 
 The Lua suites need `pip install lupa`. `tests/lua/wowmock.lua` is the stand-in
 for the game's UI; a widget method it doesn't know fails loudly, so a typo can't

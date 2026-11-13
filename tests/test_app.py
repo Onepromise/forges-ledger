@@ -412,6 +412,147 @@ class AddonCloseButtons(unittest.TestCase):
             for m in re.finditer(r'local (\w+) = CreateFrame\("Button", nil, \w+, "UIPanelCloseButton"\)', src):
                 self.assertIn(m.group(1) + ':SetScript("OnClick"', src, "%s: %s" % (path, m.group(1)))
 
+class KillLedger(unittest.TestCase):
+    SV = """ForgesLedgerKillLedgerDB = {
+        ["schemaVersion"] = 1, ["version"] = "Retail",
+        ["characters"] = { ["Testchar-Area52"] = { ["exportedAt"] = 99, ["data"] = {
+            ["name"] = "Testchar", ["class"] = "WARRIOR",
+            ["mobs"] = { ["1234"] = { ["name"] = "Boar", ["zone"] = "Elwynn Forest", ["kills"] = 8, ["lastKill"] = 50,
+                ["items"] = { ["100"] = { ["dropEvents"] = 4, ["qty"] = 6, ["name"] = "Linen Cloth", ["quality"] = 1, ["price"] = 13 },
+                              ["103"] = { ["dropEvents"] = 1, ["qty"] = 1, ["name"] = "Torn Map", ["quality"] = 1, ["price"] = 0, ["noSell"] = true } } } },
+            ["session"] = { ["startedAt"] = 40, ["mobs"] = { ["1234"] = { ["name"] = "Boar", ["kills"] = 2, ["items"] = {} } } },
+        } } } }
+    """
+
+    def test_it_is_a_registered_satellite_on_both_games(self):
+        sat = F.SATELLITES["killledger"]
+        self.assertEqual(sat["folder"], "ForgesLedger_KillLedger")
+        self.assertIn("forever", sat["games"])
+        toc = open(os.path.join(ROOT, "addon", sat["folder"], sat["folder"] + ".toc"), encoding="utf-8").read()
+        self.assertIn("## SavedVariables: " + sat["db"], toc)
+        self.assertIn("## X-Curse-Project-ID: 1758161", toc)  # ships in the Ledger bundle
+
+    def test_the_app_reads_what_the_addon_writes(self):
+        with tempfile.TemporaryDirectory() as client:
+            sv = os.path.join(client, "WTF", "Account", "ACC", "SavedVariables")
+            os.makedirs(sv)
+            open(os.path.join(sv, "ForgesLedger_KillLedger.lua"), "w", encoding="utf-8").write(self.SV)
+            sats = F.load_satellites(client, "forever")
+        e = sats["killledger"]
+        self.assertEqual(list(e["chars"]), [F.norm("Testchar") + "@" + F.norm("Area52")])
+        d = next(iter(e["chars"].values()))["data"]
+        self.assertEqual(d["mobs"]["1234"]["kills"], 8)
+        self.assertEqual(d["mobs"]["1234"]["items"]["100"]["dropEvents"], 4)
+        self.assertEqual(d["session"]["mobs"]["1234"]["kills"], 2)
+
+    def test_the_dashboard_view_adds_up_drops_and_value(self):
+        """Run the page's own Kill Ledger code (node) on two characters."""
+        import re, shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        i = F.PAGE.index("/* ---------------- Kill Ledger")
+        j = F.PAGE.index("/* recent crafting")
+        code = F.PAGE[i:j]
+        harness = code + """
+        const mk=(kills,de,qty)=>({sat:{killledger:{mobs:{"1":{name:"Boar",zone:"Elwynn",kills,lastKill:5,items:{
+          "100":{dropEvents:de,qty,name:"Linen",quality:1,price:13},"103":{dropEvents:1,qty:1,name:"Map",price:0,noSell:true}}}},
+          session:{mobs:{"1":{name:"Boar",kills:1,items:{}}}}}}});
+        const out={};
+        const l=killAgg([mk(8,4,6),mk(2,1,2)],"lifetime");
+        out.kills=l[0].kills; out.de=l[0].items["100"].dropEvents; out.qty=l[0].items["100"].qty; out.value=l[0].value;
+        out.noSell=l[0].items["103"].noSell; out.pct=dropPct(l[0].items["100"],l[0].kills);
+        out.session=killAgg([mk(8,4,6),mk(2,1,2)],"session")[0].kills;
+        out.empty=killAgg([{sat:{}},{sat:{killledger:{}}}],"lifetime").length;
+        out.coin=coin(12345);
+        console.log(JSON.stringify(out));
+        """
+        r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual((out["kills"], out["de"], out["qty"]), (10, 5, 8))
+        self.assertEqual(out["value"], 13 * 8)  # the no-sell map adds nothing
+        self.assertTrue(out["noSell"])
+        self.assertIn("50%", out["pct"])
+        self.assertIn("(5/10)", out["pct"])
+        self.assertEqual(out["session"], 2)
+        self.assertEqual(out["empty"], 0)
+        self.assertIn("1g", out["coin"])
+        self.assertIn("23s", out["coin"])
+        self.assertIn("45c", out["coin"])
+
+    def test_each_game_view_says_where_the_data_is(self):
+        """KL-4: Forever data only shows in the Forever view. A Retail view with
+        nothing on the tab points there instead of just saying 'no data'."""
+        import shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        i = F.PAGE.index("/* ---------------- Kill Ledger")
+        j = F.PAGE.index("/* recent crafting")
+        harness = F.PAGE[i:j] + """
+        const els={};const $=id=>els[id]||(els[id]={});
+        const document={querySelectorAll:()=>[]};
+        const esc=s=>String(s==null?"":s),ago=()=>"x",stat=(v,l)=>v+" "+l,satelliteCard=()=>"";
+        const ui={kscope:"session",kchar:"",kmob:""};
+        function show(game,chars,fa){D={game,forever_available:fa,characters:chars};renderKills();return els.ktable.innerHTML}
+        let D;
+        const out={};
+        out.retailEmpty=show("retail",[],true);
+        out.retailNoForever=show("retail",[],false);
+        out.foreverEmpty=show("forever",[],true);
+        out.withData=show("forever",[{key:"a@b",name:"A",sat:{killledger:{mobs:{"1":{name:"Boar",kills:3,items:{}}},session:{mobs:{"1":{name:"Boar",kills:3,items:{}}}}}}}],true);
+        console.log(JSON.stringify(out));
+        """
+        r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertIn('data-game="forever"', out["retailEmpty"])
+        self.assertIn("Retail view", out["retailEmpty"])
+        self.assertNotIn('data-game="forever"', out["retailNoForever"])  # no Forever installed: nothing to point at
+        self.assertNotIn('data-game="forever"', out["foreverEmpty"])
+        self.assertIn("Forever view", out["foreverEmpty"])
+        self.assertIn("Boar", out["withData"])
+
+    def test_the_kills_tab_sorts_searches_and_shows_pace(self):
+        """The in-game UI build's dashboard side: sort by most recent, search, pace."""
+        import shutil, subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        i = F.PAGE.index("/* ---------------- Kill Ledger")
+        j = F.PAGE.index("/* recent crafting")
+        harness = F.PAGE[i:j] + """
+        const mob=(name,zone,kills,last)=>({name,zone,kills,lastKill:last,items:{}});
+        const ch=(mobs,pace)=>({sat:{killledger:{mobs,session:{mobs:{},pace}}}});
+        const a=ch({"1":mob("Stonetusk Boar","Elwynn",30,100),"2":mob("Timber Wolf","Elwynn",20,300),"3":mob("Young Wolf","Dun Morogh",5,200)},{seconds:3600,kills:10,value:5000,perHour:5000});
+        const b=ch({"4":mob("Kobold","Elwynn",1,50)},{seconds:1800,kills:2,value:2500});
+        const list=killAgg([a,b],"lifetime"),out={};
+        out.byKills=killSort(list,"kills").map(m=>m.name);
+        out.byRecent=killSort(list,"recent").map(m=>m.name);
+        out.wolf=killFilter(list,"WOLF").map(m=>m.name).sort();
+        out.zone=killFilter(list,"dun morogh").map(m=>m.name);
+        out.none=killFilter(list,"zzz").length;
+        out.all=killFilter(list,"  ").length;
+        const pace=killPace([a,b]);
+        out.perHour=pace.perHour;out.n=pace.n;
+        out.noPace=killPace([{sat:{killledger:{mobs:{},session:{mobs:{}}}}},{sat:{}}]).perHour;
+        out.short=killPace([ch({}, {seconds:30,value:100})]).perHour;
+        console.log(JSON.stringify(out));
+        """
+        r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["byKills"], ["Stonetusk Boar", "Timber Wolf", "Young Wolf", "Kobold"])
+        self.assertEqual(out["byRecent"], ["Timber Wolf", "Young Wolf", "Stonetusk Boar", "Kobold"])
+        self.assertEqual(out["wolf"], ["Timber Wolf", "Young Wolf"])
+        self.assertEqual(out["zone"], ["Young Wolf"])
+        self.assertEqual((out["none"], out["all"]), (0, 4))
+        # 7500 value over 5400 s = 5000 per hour; two characters counted
+        self.assertEqual((out["perHour"], out["n"]), (5000, 2))
+        self.assertIsNone(out["noPace"])
+        self.assertIsNone(out["short"])  # under a minute of data: no per-hour claim
+
 
 if __name__ == "__main__":
     unittest.main()
