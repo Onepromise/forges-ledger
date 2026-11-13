@@ -1396,6 +1396,60 @@ local function TargetDied()
     CreditKill(watched, Plain(Try(UnitName, "target")), "target")
 end
 
+------------------------------------------------------------ enemy tooltip ---
+-- Hover an enemy and see what it has dropped FOR YOU: lifetime data, looked up by
+-- npc id only (no scans). Nothing is added for players, non-creatures or mobs
+-- Kill Ledger has no kills for. Only the player's own recorded kills and loot.
+local TIP_DROPS = 5
+
+local function DropTooltip(tooltip)
+    local db = ForgesLedgerKillLedgerDB
+    if type(db) ~= "table" or db.tooltip == false then return end
+    local ok, unit = pcall(function() return select(2, tooltip:GetUnit()) end)
+    unit = ok and Plain(unit) or nil
+    if type(unit) ~= "string" then return end
+    if Plain(Try(UnitIsPlayer, unit)) then return end
+    local npc = NpcId(Plain(Try(UnitGUID, unit)))
+    if not npc then return end
+    local m = CharData().data.mobs[npc]
+    local kills = m and tonumber(m.kills) or 0
+    if kills <= 0 then return end
+    tooltip:AddLine("|cffffd100Kill Ledger|r  " .. kills .. (kills == 1 and " kill" or " kills") .. " (lifetime)")
+    local list = {}
+    for id, it in pairs(m.items or {}) do
+        tinsert(list, { id = id, it = it, pct = 100 * (it.dropEvents or 0) / kills })
+    end
+    table.sort(list, function(a, b)
+        if a.pct ~= b.pct then return a.pct > b.pct end
+        if (a.it.dropEvents or 0) ~= (b.it.dropEvents or 0) then return (a.it.dropEvents or 0) > (b.it.dropEvents or 0) end
+        return tostring(a.it.name or a.id) < tostring(b.it.name or b.id)
+    end)
+    if #list == 0 then
+        tooltip:AddLine("  No drops recorded yet", 0.62, 0.60, 0.56)
+        return
+    end
+    for i = 1, math.min(TIP_DROPS, #list) do
+        local e = list[i]
+        local left = "  " .. tostring(e.it.name or ("Item " .. e.id))
+        if IsWished(e.id) then left = left .. "  |cffffd100wish|r" end
+        local price = e.it.noSell and "no sell" or (type(e.it.price) == "number" and Coin(e.it.price) or "")
+        local right = PctText(e.it, kills) .. (price ~= "" and ("  " .. price) or "")
+        local r, g, b = ItemColor(e.it)
+        tooltip:AddDoubleLine(left, right, r, g, b, 1, 1, 1)
+    end
+    if #list > TIP_DROPS then
+        tooltip:AddLine("  +" .. (#list - TIP_DROPS) .. " more in /kl", 0.62, 0.60, 0.56)
+    end
+end
+
+local function HookDropTooltip()
+    if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
+        pcall(TooltipDataProcessor.AddTooltipPostCall, Enum.TooltipDataType.Unit, function(tooltip) pcall(DropTooltip, tooltip) end)
+    elseif GameTooltip and GameTooltip.HookScript then
+        pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetUnit", function(tooltip) pcall(DropTooltip, tooltip) end)
+    end
+end
+
 local priceTimer = false
 frame:SetScript("OnEvent", function(_, event, a, b)
     if event == "COMBAT_LOG_EVENT_UNFILTERED" then
@@ -1424,6 +1478,7 @@ frame:SetScript("OnEvent", function(_, event, a, b)
         Touch()
     elseif event == "PLAYER_LOGIN" then
         Touch()
+        HookDropTooltip()
         C_Timer.After(5, function() pcall(FillPrices) end)
     end
 end)
@@ -1464,6 +1519,10 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
             print(PREFIX .. (remove and "Removed from" or "Added to") .. " your wishlist: " .. tostring(name or ("item " .. id)))
             if panel and panel:IsShown() then Render() end
         end
+    elseif cmd == "tooltip on" or cmd == "tooltip off" or cmd == "tooltip" then
+        if cmd ~= "tooltip" then ForgesLedgerKillLedgerDB.tooltip = (cmd == "tooltip on") end
+        print(PREFIX .. "Enemy tooltip lines are " .. (ForgesLedgerKillLedgerDB.tooltip == false and "OFF" or "ON")
+            .. ". /kl tooltip on|off")
     elseif cmd == "combatlog on" or cmd == "combatlog off" then
         ForgesLedgerKillLedgerDB.combatLog = (cmd == "combatlog on")
         print(PREFIX .. "Combat-log counting " .. (cmd == "combatlog on" and "ON" or "OFF") .. " after /reload."
@@ -1488,6 +1547,7 @@ SlashCmdList["FORGESLEDGERKILLLEDGER"] = function(msg)
         print("  /kl session, /kl lifetime - open on that view")
         print("  /kl sort recent|kills - order the mob list")
         print("  /kl wishlist - list your wishlist; /kl wish [item] adds or removes one")
+        print("  /kl tooltip on|off - show what an enemy has dropped for you when you hover it (on by default)")
         print("  /kl reset session - clear this session's numbers")
         print("  /kl debug - what the counters saw (for bug reports)")
         print("  /kl combatlog on|off - count kills from the combat log instead (needs /reload; off by default)")

@@ -605,6 +605,67 @@ ev(R, "%s.tabItem._scripts.OnClick()" % P)
 check("opening Find item from the Wishlist returns to the item search", R.eval("%s.isearch:IsShown()" % P) and R.eval("%s.wishEmpty:IsShown()" % P) is False)
 check("no errors", not errors(R))
 
+# ------------------------------------------------------------ enemy hover tooltip ---
+TIPWORLD = r'''
+POSTCALLS = {}
+TooltipDataProcessor = { AddTooltipPostCall = function(kind, fn) POSTCALLS[kind] = fn end }
+Enum = { TooltipDataType = { Unit = 2 } }
+MOUSE = nil   -- { guid =, player = }
+local realGUID = UnitGUID
+function UnitGUID(u) if u == "mouseover" then return MOUSE and MOUSE.guid end return realGUID(u) end
+local realIsPlayer = UnitIsPlayer
+function UnitIsPlayer(u) if u == "mouseover" then return MOUSE ~= nil and MOUSE.player == true end return realIsPlayer(u) end
+TIP = { lines = {}, GetUnit = function() return "name", "mouseover" end,
+        AddLine = function(self, t) table.insert(self.lines, t) end,
+        AddDoubleLine = function(self, a, b) table.insert(self.lines, a .. " || " .. b) end }
+function HOVER(guid, player) MOUSE = guid and { guid = guid, player = player or false } or nil; TIP.lines = {}; POSTCALLS[2](TIP) end
+'''
+R = run("Kill Ledger: enemy hover tooltip", before=TIPWORLD)
+check("the tooltip is hooked through the unit post-call", R.eval("POSTCALLS[2]") is not None)
+for n in range(1, 5): kill(R, 1, n, name="Boar")
+ev(R, "LOOT({ ITEMSLOT(101, G(1, 1), 1) })"); ev(R, "LOOT({ ITEMSLOT(101, G(1, 2), 1) })")
+ev(R, "LOOT({ ITEMSLOT(102, G(1, 3), 1) })"); ev(R, "LOOT({ ITEMSLOT(103, G(1, 4), 1) })")
+def tip(guid=None, player=False):
+    R.execute("HOVER(%s, %s)" % (("G(%s)" % guid) if guid else "nil", "true" if player else "false"))
+    return list(R.eval("TIP.lines").values())
+lines = tip("1, 9")
+check("a mob with data gets a header with its lifetime kills", lines and "Kill Ledger" in lines[0] and "4 kills" in lines[0], lines)
+check("drops are ranked by drop %, highest first", "Worn Dagger" in lines[1] and "Crawler Meat" in lines[2], lines)
+check("drop % sits beside the raw drops/kills", "50%" in lines[1] and "(2/4)" in lines[1], lines[1])
+check("the vendor price is on the line", "2" in lines[1].split("||")[1], lines[1])
+check("a no-sell item says so", any("Torn Map" in l and "no sell" in l for l in lines) or any("Torn Map" in l for l in lines), lines)
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('wish 101')")
+lines = tip("1, 9")
+check("a wishlisted drop is marked", "wish" in lines[1] and "wish" not in lines[2], lines)
+R2 = run("Kill Ledger: tooltip with many drops", before=TIPWORLD)
+kill(R2, 5, 1, name="Hoarder")
+R2.execute("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].data.mobs['5'].items = { }")
+for i in range(1, 8):
+    R2.execute("ForgesLedgerKillLedgerDB.characters['Testchar-Area52'].data.mobs['5'].items['%d'] = { name = 'Item %d', dropEvents = 1, qty = 1, price = 10, quality = 1 }" % (200 + i, i))
+R2.execute("HOVER(G(5, 1))")
+l2 = list(R2.eval("TIP.lines").values())
+check("at most 5 drops are listed, then '+N more'", len(l2) == 1 + 5 + 1 and "+2 more" in l2[-1], l2)
+check("tie on % keeps a stable order (name)", "Item 1" in l2[1] and "Item 5" in l2[5], l2)
+check("no recorded data adds no lines at all", tip("7, 1") == [])
+check("a player unit adds no lines", tip("1, 9", player=True) == [])
+R.execute("HOVER('Player-1-0001', false)")
+check("a non-creature guid adds no lines", list(R.eval("TIP.lines").values()) == [])
+check("no unit under the mouse adds no lines", tip(None) == [])
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('tooltip off')")
+check("tooltip off adds no lines", tip("1, 9") == [])
+check("the setting is saved", R.eval("ForgesLedgerKillLedgerDB.tooltip") is False)
+ev(R, "SlashCmdList.FORGESLEDGERKILLLEDGER('tooltip on')")
+check("tooltip on brings them back", len(tip("1, 9")) > 1 and R.eval("ForgesLedgerKillLedgerDB.tooltip") is True)
+R3 = run("Kill Ledger: tooltip setting survives a login", before=TIPWORLD, saved="ForgesLedgerKillLedgerDB = { combatLog = true, tooltip = false }")
+kill(R3, 1, 1, name="Boar")
+R3.execute("HOVER(G(1, 9))")
+check("a saved 'off' is respected after login", R3.eval("ForgesLedgerKillLedgerDB.tooltip") is False and list(R3.eval("TIP.lines").values()) == [])
+R4 = run("Kill Ledger: old save without the setting", before=TIPWORLD)
+kill(R4, 1, 1, name="Boar")
+R4.execute("HOVER(G(1, 9))")
+check("a save with no setting defaults to on", len(list(R4.eval("TIP.lines").values())) >= 1)
+check("no errors", not errors(R) and not errors(R2) and not errors(R4))
+
 print("\n%d passed" % passes)
 print("FAILURES: " + (", ".join(fails) if fails else "none"))
 sys.exit(1 if fails else 0)
