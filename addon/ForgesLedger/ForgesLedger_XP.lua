@@ -302,12 +302,31 @@ local RESTED = { 0.25, 0.45, 0.85 }
 local GHOST = { 0.45, 0.85, 0.35 }
 local BAR_W, BAR_H = 480, 18
 
+-- Where the bar goes. A position the player saved (by dragging) always wins. With none, the
+-- bar docks flush against the Ledger bar -- under it when that bar sits at the top of the
+-- screen, above it when it sits at the bottom -- and follows it. Without a Ledger bar it
+-- falls back to a spot above the action bars.
+local placedKey
+local function PlaceKey()
+    local c = Settings()
+    if type(c.pos) == "table" and type(c.pos[1]) == "string" then return "saved" end
+    local lb = _G["ForgesLedgerBar"]
+    if lb then return "dock:" .. ((ns.BarSettings and ns.BarSettings().anchor) or "TOP") end
+    return "default"
+end
+
 local function Place()
     if not bar then return end
     local c = Settings()
+    local key = PlaceKey()
+    placedKey = key
     bar:ClearAllPoints()
-    if type(c.pos) == "table" and type(c.pos[1]) == "string" then
+    if key == "saved" then
         bar:SetPoint(c.pos[1], UIParent, c.pos[2] or c.pos[1], tonumber(c.pos[3]) or 0, tonumber(c.pos[4]) or 0)
+    elseif key == "dock:BOTTOM" then
+        bar:SetPoint("BOTTOM", _G["ForgesLedgerBar"], "TOP", 0, 0)
+    elseif key:sub(1, 5) == "dock:" then
+        bar:SetPoint("TOP", _G["ForgesLedgerBar"], "BOTTOM", 0, 0)
     else
         bar:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 120)
     end
@@ -351,6 +370,7 @@ local lastModel
 function XP.Refresh()
     if not bar then Build() end
     local c = Settings()
+    if placedKey ~= PlaceKey() then Place() end   -- the Ledger bar may have appeared or moved sides
     if not c.enabled then bar:Hide(); XP.ApplyBlizz(); return end
     local level, xp, xpMax, rested, atMax = XP.Read()
     if not level then bar:Hide(); XP.ApplyBlizz(); return end
