@@ -49,6 +49,7 @@ def make(extra="", saved="", forever=False):
         R.execute(FOREVER)
     R.execute(extra)
     ns = R.eval("{}")
+    R.globals().NS = ns
     for f in ["ForgesLedger.lua", "ForgesLedger_Windows.lua", "ForgesLedger_Bar.lua", "ForgesLedger_XP.lua"]:
         code = open(os.path.join(ADDON, "ForgesLedger", f), encoding="utf-8").read()
         chunk = R.eval("function(code, n) local f, err = loadstring(code, '@'..n); if not f then error(err) end; return f end")(code, f)
@@ -163,6 +164,137 @@ ev(R, "SlashCmdList.FORGESLEDGER('settings')")
 lines = " ".join(str(v) for v in R.eval("(function() local o = {} for _, f in ipairs(ALL_FRAMES) do if f._text and f._text ~= '' then o[#o+1] = f._text end end return o end)()").values())
 check("the Settings window lists the XP bar toggles", "Show the XP bar" in lines and "Lock the XP bar" in lines)
 check("no errors", not errors(R))
+
+# ---------------------------------------------------------------- hide the game's XP bar ---
+GAMEBAR = r'''
+MAXLVL = false
+STB = CreateFrame("Frame", "StatusTrackingBarManager")
+STB.UpdateBarsShown = function(self) if not MAXLVL then self:Show() end end   -- the game's own refresh
+function hooksecurefunc(obj, name, fn)
+  local orig = obj[name]
+  obj[name] = function(...) local r = orig(...); fn(...); return r end
+end
+'''
+print("\n== hide the game's XP bar")
+R = make(extra=GAMEBAR)
+check("off by default: the game bar is left alone", R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz on')")
+check("hideblizz on hides the game bar (our bar is shown)", not R.eval("STB:IsShown()") and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].hideBlizz") is True)
+ev(R, "STB:Show()")
+check("when the game shows it again, it is hidden again", not R.eval("STB:IsShown()"))
+ev(R, "STB:UpdateBarsShown()")
+check("...including the manager's own refresh", not R.eval("STB:IsShown()"))
+ev(R, "STB:Show(); FireEvent('PLAYER_XP_UPDATE', 'player')")
+check("...and after an XP update", not R.eval("STB:IsShown()"))
+ev(R, "STB:Show(); FireEvent('ZONE_CHANGED_NEW_AREA')")
+check("...and after a zone change", not R.eval("STB:IsShown()"))
+ev(R, "STB:Show(); FireEvent('PLAYER_ENTERING_WORLD')")
+check("...and on entering the world", not R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('xp')")
+check("our bar off: the game bar goes back to the game (its refresh shows it)", R.eval("STB:IsShown()") and not R.eval("ForgesLedgerXPBar:IsShown()"))
+ev(R, "STB:Hide(); STB:Show()")
+check("...and it is no longer being hidden", R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('xp')")
+check("our bar back on: hiding resumes (toggle still on)", not R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz off')")
+check("hideblizz off: stock behaviour returns", R.eval("STB:IsShown()") and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].hideBlizz") is False)
+ev(R, "STB:Show(); STB:Show()")
+check("...and it is never hidden again while off", R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz')")
+check("bare 'hideblizz' toggles", R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].hideBlizz") is True and not R.eval("STB:IsShown()"))
+ev(R, "SlashCmdList.FORGESLEDGER('settings')")
+lines = " ".join(str(v) for v in R.eval("(function() local o = {} for _, f in ipairs(ALL_FRAMES) do if f._text and f._text ~= '' then o[#o+1] = f._text end end return o end)()").values())
+check("the Settings window has the toggle", "Hide the game" in lines)
+check("no errors", not errors(R))
+
+R = make(extra=GAMEBAR + "MAXLVL = true; STB:Hide()")
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz on')")
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz off')")
+check("at max level the toggle never force-Shows the game bar", not R.eval("STB:IsShown()"))
+
+R = make(extra=GAMEBAR + "function InCombatLockdown() return true end; STB.IsProtected = function() return true end")
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz on')")
+check("in combat lockdown a protected frame is not touched", R.eval("STB:IsShown()"))
+ev(R, "function InCombatLockdown() return false end; FireEvent('PLAYER_REGEN_ENABLED')")
+check("...it is hidden when the lockdown lifts", not R.eval("STB:IsShown()"))
+
+R = make()
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz on')")
+check("a client with neither frame: loads clean, the command works, nothing happens", not errors(R) and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].hideBlizz") is True)
+R = make(extra="MainMenuExpBar = CreateFrame('Frame', 'MainMenuExpBar')")
+ev(R, "SlashCmdList.FORGESLEDGER('xp hideblizz on')")
+check("the classic-style frame name is found too", not R.eval("MainMenuExpBar:IsShown()"))
+R = make(extra=GAMEBAR, saved="ForgeGoldDB = { xpbar = { ['Testchar-Area52'] = { hideBlizz = true } } }")
+check("a saved 'on' hides it at login", not R.eval("STB:IsShown()"))
+R = make(extra=GAMEBAR, saved="ForgeGoldDB = { chars = { } }")
+check("an old save defaults to off", R.eval("STB:IsShown()") and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].hideBlizz") is False)
+
+# ---------------------------------------------------------------- quest XP preview ---
+QUESTS = r'''
+QUESTLIST = {}
+C_QuestLog = {
+  GetNumQuestLogEntries = function() return #QUESTLIST, #QUESTLIST end,
+  GetInfo = function(i) local q = QUESTLIST[i]; return q and { questID = q.id, isHeader = q.header or false } end,
+  ReadyForTurnIn = function(id) for _, q in ipairs(QUESTLIST) do if q.id == id then return q.ready end end end,
+  GetQuestLogRewardXP = function(id) for _, q in ipairs(QUESTLIST) do if q.id == id then return q.xp end end end,
+}
+'''
+SOME = "QUESTLIST = { {id=900, header=true}, {id=1, ready=true, xp=500}, {id=2, ready=true, xp=300}, {id=3, ready=false, xp=9999}, {id=4, ready=true, xp=0}, {id=5, ready=true} }"
+print("\n== quest XP preview")
+R = make(extra=QUESTS + SOME)
+w = lambda: R.eval("ForgesLedgerXPBar.ghost:GetWidth()")
+check("only complete quests with a readable reward are summed (800 from 2 quests)", R.eval("ForgesLedgerXPBar.model.pending") == 800 and R.eval("ForgesLedgerXPBar.model.pendingQuests") == 2, (R.eval("ForgesLedgerXPBar.model.pending"), R.eval("ForgesLedgerXPBar.model.pendingQuests")))
+check("the ghost segment is sized to the pending XP", abs(w() - 480 * 0.08) < 0.01 and R.eval("ForgesLedgerXPBar.ghost._shown"), w())
+check("...and starts where the XP fill ends", abs(R.eval("ForgesLedgerXPBar.ghost._points[1][4]") - 480 * 0.41) < 0.01, R.eval("ForgesLedgerXPBar.ghost._points[1][4]"))
+R.execute("ForgesLedgerXPBar._scripts.OnEnter(ForgesLedgerXPBar)")
+tip = " | ".join(R.eval("GameTooltip._lines").values())
+check("the tooltip says how much, how many quests and where it takes you", "+800 XP ready" in tip and "2 quests" in tip and "takes you to 49%" in tip, tip)
+ev(R, "QUESTLIST[2].ready = false; FireEvent('QUEST_LOG_UPDATE')")
+check("a quest-log change refreshes the figure", R.eval("ForgesLedgerXPBar.model.pending") == 300 and R.eval("ForgesLedgerXPBar.model.pendingQuests") == 1)
+ev(R, "QUESTLIST = { }; FireEvent('QUEST_TURNED_IN')")
+check("nothing ready: no segment", not R.eval("ForgesLedgerXPBar.ghost._shown"))
+R.execute("ForgesLedgerXPBar._scripts.OnEnter(ForgesLedgerXPBar)")
+check("...and no zero line", "XP ready" not in " | ".join(R.eval("GameTooltip._lines").values()))
+ev(R, "QUESTLIST = { {id=1, ready=true, xp=20000} }; FireEvent('QUEST_ACCEPTED')")
+check("pending >= remaining: the segment fills the bar and is capped", abs(w() - 480 * 0.59) < 0.01 and R.eval("ForgesLedgerXPBar.model.enough"), w())
+R.execute("ForgesLedgerXPBar._scripts.OnEnter(ForgesLedgerXPBar)")
+tip = " | ".join(R.eval("GameTooltip._lines").values())
+check("...worded 'enough to level', with no overflow figure", "enough to level" in tip and "takes you" not in tip, tip)
+ev(R, "QUESTLIST = { {id=1, ready=true, xp=500} }; XPMAX = 5000; FireEvent('PLAYER_LEVEL_UP', 35); FireEvent('PLAYER_XP_UPDATE', 'player')")
+check("a level-up refreshes it against the new bar", abs(w() - 480 * 0.10) < 0.01, w())
+ev(R, "SlashCmdList.FORGESLEDGER('xp questxp off')")
+check("questxp off: no segment", not R.eval("ForgesLedgerXPBar.ghost._shown") and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].questXP") is False)
+R.execute("ForgesLedgerXPBar._scripts.OnEnter(ForgesLedgerXPBar)")
+check("...and no tooltip line", "XP ready" not in " | ".join(R.eval("GameTooltip._lines").values()))
+ev(R, "SlashCmdList.FORGESLEDGER('xp questxp on')")
+check("questxp on brings it back", R.eval("ForgesLedgerXPBar.ghost._shown"))
+check("the API in use is reported", R.eval("NS.XP.QuestAPI()") == "C_QuestLog.GetQuestLogRewardXP", R.eval("NS.XP.QuestAPI()"))
+ev(R, "SlashCmdList.FORGESLEDGER('settings')")
+lines = " ".join(str(v) for v in R.eval("(function() local o = {} for _, f in ipairs(ALL_FRAMES) do if f._text and f._text ~= '' then o[#o+1] = f._text end end return o end)()").values())
+check("the Settings window has the toggle", "quest XP" in lines)
+check("no errors", not errors(R))
+
+R = make(extra=QUESTS + SOME + "LEVEL = 90; XP = 0; XPMAX = 0")
+check("max level: no segment, no line", not R.eval("ForgesLedgerXPBar.ghost._shown") and R.eval("ForgesLedgerXPBar.model.pending") == 0 and not errors(R))
+R = make(extra="")
+check("no reward API on the client: quietly absent, no error", not R.eval("ForgesLedgerXPBar.ghost._shown") and R.eval("NS.XP.QuestAPI()") is None and not errors(R))
+R.execute("ForgesLedgerXPBar._scripts.OnEnter(ForgesLedgerXPBar)")
+check("...and no tooltip line either", "XP ready" not in " | ".join(R.eval("GameTooltip._lines").values()))
+CLASSIC = r'''
+C_QuestLog = nil
+CQ = { {"Header", true, false, nil}, {"Done", false, true, 11}, {"Open", false, false, 12} }
+function GetNumQuestLogEntries() return #CQ, #CQ end
+function GetQuestLogTitle(i) local q = CQ[i]; return q[1], 10, "", q[2], false, q[3] and 1 or -1, "", q[4] end
+function GetQuestLogRewardXP(id) if id == 11 then return 700 end return 4000 end
+'''
+R = make(extra=CLASSIC)
+check("the older global API works too (complete quests only)", R.eval("ForgesLedgerXPBar.model.pending") == 700 and R.eval("NS.XP.QuestAPI()") == "GetQuestLogRewardXP", R.eval("ForgesLedgerXPBar.model.pending"))
+R = make(extra=QUESTS + SOME, saved="ForgeGoldDB = { xpbar = { ['Testchar-Area52'] = { questXP = false } } }")
+check("a saved 'off' is respected", not R.eval("ForgesLedgerXPBar.ghost._shown"))
+R = make(extra=QUESTS + SOME, saved="ForgeGoldDB = { chars = { } }")
+check("an old save defaults to on", R.eval("ForgesLedgerXPBar.ghost._shown") and R.eval("ForgeGoldDB.xpbar['Testchar-Area52'].questXP") is True)
+R = make(extra=QUESTS + "function C_QuestLog.GetQuestLogRewardXP() error('boom') end " + SOME)
+check("a reward call that errors is excluded, not fatal", not errors(R) and R.eval("ForgesLedgerXPBar.model.pending") == 0)
 
 print("\n%d passed" % passes)
 print("FAILURES: " + (", ".join(fails) if fails else "none"))

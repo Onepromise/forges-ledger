@@ -35,6 +35,8 @@ local function Settings()
     if type(c) ~= "table" then c = {}; ForgeGoldDB.xpbar[key] = c end
     if c.enabled == nil then c.enabled = true end
     if c.locked == nil then c.locked = false end
+    if c.hideBlizz == nil then c.hideBlizz = false end   -- hide the game's own XP bar: off until asked
+    if c.questXP == nil then c.questXP = true end        -- quest XP preview: on until switched off
     return c
 end
 XP.Settings = Settings
@@ -108,10 +110,11 @@ end
 
 -- Pure: everything the bar shows, from numbers.
 -- level, xp, xpMax, rested, atMax  ->  model
-function XP.Model(level, xp, xpMax, rested, atMax, now)
+function XP.Model(level, xp, xpMax, rested, atMax, now, pending, pendingQuests)
     local m = { level = level, atMax = atMax }
     if atMax then
         m.pct, m.remaining, m.restedPct = 100, 0, 0
+        m.pending, m.pendingQuests, m.pendingPct, m.enough = 0, 0, 0, false   -- no quest preview at max level
         return m
     end
     xp = math.max(0, math.min(xp, xpMax))
@@ -119,6 +122,18 @@ function XP.Model(level, xp, xpMax, rested, atMax, now)
     m.remaining = xpMax - xp
     m.rested = rested
     m.restedPct = math.min(100 - m.pct, 100 * (rested or 0) / xpMax)   -- runway, capped at the bar's end
+    -- quest XP ready to hand in: a ghost segment from where the fill ends, capped at the bar's end.
+    -- Never an overflow figure into the next level.
+    m.pending, m.pendingQuests, m.pendingPct, m.enough, m.pendingTo = 0, 0, 0, false, nil
+    if type(pending) == "number" and pending > 0 then
+        m.pending, m.pendingQuests = pending, pendingQuests or 0
+        m.pendingPct = math.min(100 - m.pct, 100 * pending / xpMax)
+        if pending >= m.remaining then
+            m.enough = true
+        else
+            m.pendingTo = math.floor(m.pct + 100 * pending / xpMax)
+        end
+    end
     now = now or Now()
     local elapsed = s and (now - s.start) or 0
     m.elapsed = elapsed
@@ -173,9 +188,118 @@ function XP.Text(m)
     return t
 end
 
+-- ------------------------------------------------------------ quest XP ready to hand in
+-- Which reward-XP API each client has is detected (never assumed). A complete quest whose reward
+-- reads 0 or unreadable is left out, never guessed. No API at all = the preview is quietly absent.
+local questCache, questDirty = nil, true
+local deferredHide = false
+
+local function RewardXPFn()
+    if C_QuestLog and C_QuestLog.GetQuestLogRewardXP then return C_QuestLog.GetQuestLogRewardXP, "C_QuestLog.GetQuestLogRewardXP" end
+    if GetQuestLogRewardXP then return GetQuestLogRewardXP, "GetQuestLogRewardXP" end
+    return nil
+end
+function XP.QuestAPI() local _, name = RewardXPFn(); return name end
+
+local function QuestEntries()
+    -- returns a list of { questID, ready } for quests in the log
+    local out = {}
+    if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
+        local n = Pcall(C_QuestLog.GetNumQuestLogEntries)
+        if type(n) ~= "number" then return out end
+        for i = 1, n do
+            local ok, info = pcall(C_QuestLog.GetInfo, i)
+            if ok and type(info) == "table" and not info.isHeader and info.questID then
+                local ready = false
+                if C_QuestLog.ReadyForTurnIn then ready = Pcall(C_QuestLog.ReadyForTurnIn, info.questID) and true or false
+                elseif C_QuestLog.IsComplete then ready = Pcall(C_QuestLog.IsComplete, info.questID) and true or false end
+                out[#out + 1] = { questID = info.questID, ready = ready }
+            end
+        end
+    elseif GetNumQuestLogEntries and GetQuestLogTitle then
+        local n = Pcall(GetNumQuestLogEntries)
+        if type(n) ~= "number" then return out end
+        for i = 1, n do
+            local ok, _, _, _, isHeader, _, isComplete, _, questID = pcall(GetQuestLogTitle, i)
+            if ok and not isHeader and questID then
+                out[#out + 1] = { questID = questID, ready = (isComplete == 1 or isComplete == true) }
+            end
+        end
+    end
+    return out
+end
+
+-- { xp, count } for quests ready to hand in, or nil when this client can't say
+function XP.Quests()
+    if not questDirty and questCache ~= nil then return questCache or nil end
+    questDirty = false
+    local fn = RewardXPFn()
+    if not fn then questCache = false; return nil end
+    local xp, count = 0, 0
+    for _, e in ipairs(QuestEntries()) do
+        if e.ready then
+            local r = Pcall(fn, e.questID)
+            if type(r) == "number" and r > 0 then xp = xp + r; count = count + 1 end
+        end
+    end
+    questCache = { xp = xp, count = count }
+    return questCache
+end
+
+-- ------------------------------------------------------------ the game's own XP bar
+-- Hidden only while the setting is on AND our bar is shown; kept hidden by re-hiding after the
+-- game shows it. Never force-Shown: when we stop, the game's own update decides (at max level it
+-- keeps its bar hidden itself). Frame names differ by client generation; whichever exist are used.
+local BLIZZ_FRAMES = { "StatusTrackingBarManager", "MainStatusTrackingBarContainer", "MainMenuExpBar" }
+local hooked, hidByUs = {}, {}
+
+local function BlizzActive()
+    local c = Settings()
+    return c.hideBlizz and c.enabled and bar ~= nil and bar:IsShown()
+end
+
+local function HideFrame(f)
+    if InCombatLockdown and InCombatLockdown() and f.IsProtected and f:IsProtected() then
+        deferredHide = true       -- apply when the lockdown lifts
+        return
+    end
+    if f.IsShown and f:IsShown() then pcall(f.Hide, f) end
+    hidByUs[f] = true
+end
+
+function XP.BlizzFrames()
+    local out = {}
+    for _, name in ipairs(BLIZZ_FRAMES) do
+        local f = _G[name]
+        if type(f) == "table" and f.Hide then out[#out + 1] = f end
+    end
+    return out
+end
+
+function XP.ApplyBlizz()
+    if BlizzActive() then
+        for _, f in ipairs(XP.BlizzFrames()) do
+            if hooksecurefunc and not hooked[f] then
+                hooked[f] = true
+                local function rehide() if BlizzActive() then HideFrame(f) end end
+                pcall(hooksecurefunc, f, "Show", rehide)
+                if f.UpdateBarsShown then pcall(hooksecurefunc, f, "UpdateBarsShown", rehide) end
+            end
+            HideFrame(f)
+        end
+    else
+        -- stop hiding; give the bar back to the game (its own refresh decides whether it shows)
+        for f in pairs(hidByUs) do
+            hidByUs[f] = nil
+            if f.UpdateBarsShown then pcall(f.UpdateBarsShown, f) end
+        end
+    end
+end
+
 -- ------------------------------------------------------------ the bar
 local FILL = { 0.78, 0.60, 0.10 }   -- Ledger gold
 local RESTED = { 0.25, 0.45, 0.85 }
+local GHOST = { 0.45, 0.85, 0.35 }
 local BAR_W, BAR_H = 480, 18
 
 local function Place()
@@ -205,6 +329,8 @@ local function Build()
     bar.rested:SetColorTexture(RESTED[1], RESTED[2], RESTED[3], 0.55)
     bar.fill = bar:CreateTexture(nil, "ARTWORK")
     bar.fill:SetColorTexture(FILL[1], FILL[2], FILL[3], 0.95)
+    bar.ghost = bar:CreateTexture(nil, "ARTWORK", nil, 1)   -- quest XP ready to hand in
+    bar.ghost:SetColorTexture(GHOST[1], GHOST[2], GHOST[3], 0.6)
     bar.edge = bar:CreateTexture(nil, "OVERLAY")
     bar.edge:SetPoint("TOPLEFT"); bar.edge:SetPoint("TOPRIGHT"); bar.edge:SetHeight(1)
     bar.edge:SetColorTexture(1, 0.82, 0, 0.6)
@@ -225,10 +351,11 @@ local lastModel
 function XP.Refresh()
     if not bar then Build() end
     local c = Settings()
-    if not c.enabled then bar:Hide(); return end
+    if not c.enabled then bar:Hide(); XP.ApplyBlizz(); return end
     local level, xp, xpMax, rested, atMax = XP.Read()
-    if not level then bar:Hide(); return end
-    local m = XP.Model(level, xp, xpMax, rested, atMax)
+    if not level then bar:Hide(); XP.ApplyBlizz(); return end
+    local q = (c.questXP and not atMax) and XP.Quests() or nil
+    local m = XP.Model(level, xp, xpMax, rested, atMax, nil, q and q.xp, q and q.count)
     lastModel = m
     bar.fill:ClearAllPoints()
     bar.fill:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -1)
@@ -239,9 +366,16 @@ function XP.Refresh()
     bar.rested:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", BAR_W * m.pct / 100, 0)
     bar.rested:SetWidth(math.max(0.001, BAR_W * m.restedPct / 100))
     bar.rested:SetShown(m.restedPct > 0)
+    local ghostFrom = m.pct   -- starts where the XP fill ends
+    bar.ghost:ClearAllPoints()
+    bar.ghost:SetPoint("TOPLEFT", bar, "TOPLEFT", BAR_W * ghostFrom / 100, -1)
+    bar.ghost:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", BAR_W * ghostFrom / 100, 0)
+    bar.ghost:SetWidth(math.max(0.001, BAR_W * m.pendingPct / 100))
+    bar.ghost:SetShown((m.pendingPct or 0) > 0)
     bar.text:SetText(XP.Text(m))
     bar.model = m
     bar:Show()
+    XP.ApplyBlizz()
 end
 
 function XP.Tooltip(owner)
@@ -255,6 +389,11 @@ function XP.Tooltip(owner)
         else
             GameTooltip:AddLine(string.format("Level %d: %.1f%% - %s XP to go", m.level, m.pct, Commas(m.remaining)), 1, 1, 1)
             if (m.rested or 0) > 0 then GameTooltip:AddLine("Rested: " .. Commas(m.rested) .. " XP", 0.45, 0.65, 1) end
+            if (m.pending or 0) > 0 then
+                GameTooltip:AddLine("+" .. Commas(m.pending) .. " XP ready  \194\183  " .. m.pendingQuests
+                    .. (m.pendingQuests == 1 and " quest" or " quests") .. "  \194\183  "
+                    .. (m.enough and "enough to level" or ("takes you to " .. m.pendingTo .. "%")), 0.45, 0.85, 0.35)
+            end
             if m.ready then
                 GameTooltip:AddLine(Commas(m.perHour) .. " XP per hour this session", 1, 1, 1)
                 GameTooltip:AddLine("About " .. Duration(m.secondsToLevel) .. " to level at that pace", 1, 1, 1)
@@ -289,11 +428,38 @@ function XP.SettingsLines()
         { text = "XP bar", header = true },
         { text = (c.enabled and CHECK or BOX) .. " Show the XP bar", onClick = function() XP.SetEnabled(not Settings().enabled) end },
         { text = (c.locked and CHECK or BOX) .. " Lock the XP bar's position", onClick = function() XP.SetLocked(not Settings().locked) end },
+        { text = (c.hideBlizz and CHECK or BOX) .. " Hide the game's XP bar", onClick = function() XP.SetHideBlizz(not Settings().hideBlizz) end },
+        { text = (c.questXP and CHECK or BOX) .. " Show quest XP ready to hand in", onClick = function() XP.SetQuestXP(not Settings().questXP) end },
     }
 end
 
--- /fl xp [lock]; returns the line to print
+function XP.SetHideBlizz(on)
+    Settings().hideBlizz = on and true or false
+    XP.Refresh()
+    if not on then XP.ApplyBlizz() end
+end
+
+function XP.SetQuestXP(on)
+    Settings().questXP = on and true or false
+    questDirty = true
+    XP.Refresh()
+end
+
+-- /fl xp [lock|unlock|hideblizz on|off|questxp on|off]; returns the line to print
 function XP.Command(arg)
+    arg = arg or ""
+    local onoff = arg:match("^%a+%s+(%a+)$")
+    local word = arg:match("^(%a+)")
+    if word == "hideblizz" or word == "questxp" then
+        local cur = Settings().questXP
+        if word == "hideblizz" then cur = Settings().hideBlizz end
+        local on = (onoff == "on") and true or (onoff == "off" and false or not cur)
+        if word == "hideblizz" then XP.SetHideBlizz(on) else XP.SetQuestXP(on) end
+        if word == "hideblizz" then
+            return "The game's XP bar is " .. (on and "hidden while the Ledger XP bar is shown." or "left to the game (it may reappear at its next update).")
+        end
+        return "Quest XP preview " .. (on and "on." or "off.")
+    end
     if arg == "lock" or arg == "unlock" then
         local on = (arg == "lock")
         XP.SetLocked(on)
@@ -314,7 +480,8 @@ end
 
 local ev = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_XP_UPDATE", "UPDATE_EXHAUSTION",
-                     "PLAYER_LEVEL_UP", "CHAT_MSG_COMBAT_XP_GAIN" }) do
+                     "PLAYER_LEVEL_UP", "CHAT_MSG_COMBAT_XP_GAIN", "ZONE_CHANGED_NEW_AREA", "PLAYER_REGEN_ENABLED",
+                     "QUEST_LOG_UPDATE", "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "UNIT_QUEST_LOG_CHANGED" }) do
     pcall(ev.RegisterEvent, ev, e)   -- in case a client lacks one
 end
 local acc = 0
@@ -329,6 +496,7 @@ ev:SetScript("OnEvent", function(_, event, arg1)
         XP.Refresh()
     elseif event == "PLAYER_XP_UPDATE" then
         if arg1 and arg1 ~= "player" then return end
+        questDirty = true
         local level, xp, xpMax = XP.Read()
         if level and last.level and type(xp) == "number" then
             local delta
@@ -343,10 +511,15 @@ ev:SetScript("OnEvent", function(_, event, arg1)
         XP.Refresh()
     elseif event == "CHAT_MSG_COMBAT_XP_GAIN" then
         XP.OnKillMessage()
+    elseif event == "QUEST_LOG_UPDATE" or event == "QUEST_ACCEPTED" or event == "QUEST_TURNED_IN"
+            or event == "QUEST_REMOVED" or event == "UNIT_QUEST_LOG_CHANGED" then
+        if event == "UNIT_QUEST_LOG_CHANGED" and arg1 and arg1 ~= "player" then return end
+        questDirty = true
+        XP.Refresh()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if deferredHide then deferredHide = false; XP.ApplyBlizz() end
     else     -- UPDATE_EXHAUSTION, PLAYER_LEVEL_UP
-        if event == "PLAYER_LEVEL_UP" then
-            -- the level in UnitLevel can lag; the next XP update re-reads it
-        end
+        if event == "PLAYER_LEVEL_UP" then questDirty = true end   -- (UnitLevel can lag; the next XP update re-reads it)
         XP.Refresh()
     end
 end)

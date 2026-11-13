@@ -521,9 +521,9 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         local on = not ns.BarSettings().enabled
         ns.SetBarEnabled(on)
         print(PREFIX .. "Bar " .. (on and "shown." or "hidden. Type /fl bar to show it again."))
-    elseif cmd == "xp" or cmd == "xp lock" or cmd == "xp unlock" then
+    elseif cmd == "xp" or cmd:match("^xp%s") then
         if ns.XP then
-            print(PREFIX .. ns.XP.Command(cmd:match("^xp%s+(%a+)")))
+            print(PREFIX .. ns.XP.Command(cmd:match("^xp%s+(.-)$")))
         else
             print(PREFIX .. "The XP bar isn't available here.")
         end
@@ -549,7 +549,8 @@ SlashCmdList["FORGESLEDGER"] = function(msg)
         print("  /fl bar - show/hide the bar (/fl bar top or /fl bar bottom to move it)")
         print("  /fl bar center or /fl bar left - center the segments or keep them on the left")
         print("  /fl bar fit or /fl bar full - fit the bar to its segments, or stretch it across the screen")
-        print("  /fl xp - show/hide the XP bar (/fl xp lock or /fl xp unlock pins or frees it)")
+        print("  /fl xp - show/hide the XP bar (/fl xp lock|unlock pins or frees it)")
+        print("  /fl xp hideblizz on|off - hide the game's own XP bar; /fl xp questxp on|off - quest XP ready to hand in")
         print("  /fl ledger, /fl gold, /fl todo, /fl vault, /fl prof - open a window")
         print("  /fl dungeons - the Dungeons panel (with the Dungeons companion addon)")
         print("  /fl settings - bar settings")
