@@ -1203,6 +1203,9 @@ function SettingsLines()
                              QueueRefresh()
                          end })
     end
+    if ns.XP and ns.XP.SettingsLines then
+        for _, l in ipairs(ns.XP.SettingsLines()) do tinsert(lines, l) end
+    end
     tinsert(lines, { text = "/fl bar shows or hides the bar; /fl help lists the windows.", dim = true })
     tinsert(lines, { text = "With the bar hidden, sync with /fl sync or the keybind.", dim = true })
     return lines

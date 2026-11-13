@@ -9,3 +9,4 @@
 ForgesLedger.lua
 ForgesLedger_Windows.lua
 ForgesLedger_Bar.lua
+ForgesLedger_XP.lua
